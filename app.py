@@ -1,11 +1,9 @@
 # app.py
 # ============================================================
 # DASHBOARD: Drivers fenológicos/estructura asociados a KG/HA
-# Fuente: "CONSOLIDADO 2022-2026.xlsx" | Hoja: "DATA"
-# Autor: (tu proyecto)
+# Fuente: Excel subido por el usuario | Hoja: "DATA"
 # ============================================================
 
-import os
 import re
 import numpy as np
 import pandas as pd
@@ -21,22 +19,21 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestRegressor
 
+
 # -------------------------
 # CONFIG STREAMLIT
 # -------------------------
-st.set_page_config(
-    page_title="Fenología vs Rendimiento (KG/HA)",
-    layout="wide"
-)
+st.set_page_config(page_title="Fenología vs Rendimiento (KG/HA)", layout="wide")
 
 st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
-st.caption("Objetivo: identificar variables fenológicas/estructura más asociadas a cambios en KG/HA y facilitar el análisis por filtros (Fundo→Etapa→Campo→Turno→Variedad→Semana→Campaña).")
-
+st.caption(
+    "Objetivo: identificar variables fenológicas/estructura más asociadas a cambios en KG/HA y facilitar el análisis por filtros "
+    "(Fundo→Etapa→Campo→Turno→Variedad→Semana→Campaña)."
+)
 
 # -------------------------
-# PARAMETROS DATA
+# PARAMETROS / DICCIONARIOS
 # -------------------------
-RUTA_DEFAULT = r"C:\Users\JeinerJhoelLunaYacup\Desktop\CONSOLIDADO 2022-2026.xlsx"
 HOJA = "DATA"
 
 COLUMNAS_ESPERADAS = [
@@ -57,7 +54,6 @@ CATEGORICAS_BASE = [
     "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "TIPO PODA", "SIEMBRA", "EDAD PLANTA FINAL"
 ]
 
-# Variables “core” para mostrar en la tarjeta de MAX/MIN:
 FENOLOGIA_CORE = [
     "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "FRUTO CREMOSO", "FRUTO ROSADO", "FRUTO MADURO",
     "PESO BAYA (g)", "CALIBRE BAYA (mm)", "PESO BAYA CREMOSO (g)", "CALIBRE CREMOSO (mm)"
@@ -74,37 +70,33 @@ BROTES_CORE = [
     "BT_N_BROTES_ULT", "BT_LONG_B1_ULT", "BT_LONG_B2_ULT", "BT_DIAM_B1_ULT", "BT_DIAM_B2_ULT",
 ]
 
+
 # -------------------------
 # UTILIDADES
 # -------------------------
 def _to_numeric_safe(s: pd.Series) -> pd.Series:
-    """Convierte a numérico tolerando strings raros."""
     return pd.to_numeric(s, errors="coerce")
 
 
 def _normalize_edad_final(x):
-    """Normaliza EDAD PLANTA FINAL a {1,2,'3+'} si viniera con formatos distintos."""
     if pd.isna(x):
         return np.nan
     x_str = str(x).strip()
-    # acepta "3+", "3 +", "3", "3.0", etc
     if re.match(r"^3\s*\+?$", x_str) or "3+" in x_str:
         return "3+"
     if x_str in ["1", "1.0", "01"]:
         return "1"
     if x_str in ["2", "2.0", "02"]:
         return "2"
-    # si ya viene correcto:
     if x_str in ["3+"]:
         return "3+"
     return x_str
 
 
-def _smart_nan_for_zeros(df: pd.DataFrame, cols: list[str], zero_is_missing: bool = True) -> pd.DataFrame:
+def _smart_nan_for_zeros(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     """
-    Muchas variables no evaluadas pueden venir en 0.
-    Criterio: si una columna tiene demasiados ceros (y muy pocos valores >0),
-    interpretamos que 0 podría ser 'no evaluado' y lo convertimos a NaN.
+    Heurística: si una columna es casi todo 0 y casi no hay positivos,
+    interpretamos 0 como 'no evaluado' y lo pasamos a NaN.
     """
     out = df.copy()
     for c in cols:
@@ -114,7 +106,6 @@ def _smart_nan_for_zeros(df: pd.DataFrame, cols: list[str], zero_is_missing: boo
             continue
 
         s = out[c]
-        # porcentaje de ceros en no-nulos
         nn = s.notna().sum()
         if nn == 0:
             continue
@@ -122,19 +113,14 @@ def _smart_nan_for_zeros(df: pd.DataFrame, cols: list[str], zero_is_missing: boo
         zeros = (s == 0).sum()
         pos = (s > 0).sum()
 
-        # Heurística:
-        # - si casi todo son ceros y casi no hay positivos, es sospechoso (no evaluado)
-        # - si hay muchos positivos, el cero sí puede ser valor real (ej. conteo 0)
-        if zero_is_missing and zeros / nn > 0.85 and pos / nn < 0.10:
+        if zeros / nn > 0.85 and pos / nn < 0.10:
             out.loc[out[c] == 0, c] = np.nan
-
     return out
 
 
 @st.cache_data(show_spinner=False)
-def cargar_data(ruta: str, hoja: str) -> pd.DataFrame:
-    df = pd.read_excel(ruta, sheet_name=hoja)
-    # Limpieza básica de columnas: quitar espacios extremos
+def cargar_excel(uploaded_file, hoja: str) -> pd.DataFrame:
+    df = pd.read_excel(uploaded_file, sheet_name=hoja)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -149,57 +135,50 @@ def validar_columnas(df: pd.DataFrame):
 def preparar_df(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
 
-    # Tipos:
     for c in ["AÑO", "CAMPAÑA", "SEMANA"]:
         if c in d.columns:
             d[c] = _to_numeric_safe(d[c]).astype("Int64")
 
-    # Categóricas a string
     for c in CATEGORICAS_BASE:
         if c in d.columns:
             d[c] = d[c].astype("string").str.strip()
 
-    # Normalizar EDAD PLANTA FINAL
     if "EDAD PLANTA FINAL" in d.columns:
         d["EDAD PLANTA FINAL"] = d["EDAD PLANTA FINAL"].apply(_normalize_edad_final).astype("string")
 
-    # Fechas (si vienen como texto)
     for c in ["FECHA PODA", "FECHA FIN DE SIEMBRA"]:
         if c in d.columns:
             d[c] = pd.to_datetime(d[c], errors="coerce")
 
-    # Numéricas: todo lo que no sea base categórica y no sea llaves
     llaves = ["AÑO", "CAMPAÑA", "SEMANA"] + CATEGORICAS_BASE + ["EDAD PLANTA"]
     num_cols = [c for c in d.columns if c not in llaves and c not in ["FECHA PODA", "FECHA FIN DE SIEMBRA"]]
 
-    # Fuerza a numérico donde se pueda (respetando nombres)
     for c in num_cols:
         d[c] = _to_numeric_safe(d[c])
 
-    # Si KG/HA existe, úsala; si no, calcula proxy con kilogramos / Ha TURNO
+    # Si KG/HA viene vacío, intentamos calcularlo
     if "KG/HA" not in d.columns:
         d["KG/HA"] = np.nan
 
-    # Asegurar kilogramos, Ha TURNO
     if "kilogramos" in d.columns and "Ha TURNO" in d.columns:
         mask_nan = d["KG/HA"].isna()
         denom = d["Ha TURNO"].replace({0: np.nan})
         d.loc[mask_nan, "KG/HA"] = d.loc[mask_nan, "kilogramos"] / denom
 
-    # Crear KG/PLANTA (si densidad disponible)
+    # KG/PLANTA
     if "DENSIDAD" in d.columns and "Ha TURNO" in d.columns and "kilogramos" in d.columns:
         plantas = d["Ha TURNO"].replace({0: np.nan}) * d["DENSIDAD"].replace({0: np.nan})
         d["KG/PLANTA"] = d["kilogramos"] / plantas
     else:
         d["KG/PLANTA"] = np.nan
 
-    # Heurística de ceros como missing para variables típicamente "no evaluadas" en algunos periodos
     candidatos_zeros_missing = (
-        ESTRUCTURA_CORE + BROTES_CORE + ["ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT",
-                                         "PESO BAYA (g)", "PESO BAYA CREMOSO (g)",
-                                         "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)"]
+        ESTRUCTURA_CORE + BROTES_CORE + [
+            "PESO BAYA (g)", "PESO BAYA CREMOSO (g)",
+            "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
+        ]
     )
-    d = _smart_nan_for_zeros(d, candidatos_zeros_missing, zero_is_missing=True)
+    d = _smart_nan_for_zeros(d, candidatos_zeros_missing)
 
     return d
 
@@ -207,12 +186,9 @@ def preparar_df(df: pd.DataFrame) -> pd.DataFrame:
 def filtrar_df(d: pd.DataFrame, filtros: dict) -> pd.DataFrame:
     out = d.copy()
     for col, val in filtros.items():
-        if val is None:
-            continue
-        if col not in out.columns:
+        if val is None or col not in out.columns:
             continue
         if isinstance(val, tuple) and len(val) == 2:
-            # rango para SEMANA
             lo, hi = val
             out = out[(out[col].notna()) & (out[col] >= lo) & (out[col] <= hi)]
         elif isinstance(val, list):
@@ -224,9 +200,6 @@ def filtrar_df(d: pd.DataFrame, filtros: dict) -> pd.DataFrame:
 
 
 def resumen_registro(row: pd.Series) -> pd.DataFrame:
-    """
-    Construye una tabla vertical (Variable, Valor) para mostrar el caso MAX/MIN.
-    """
     campos = [
         "AÑO", "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
         "SIEMBRA", "TIPO PODA", "EDAD PLANTA FINAL",
@@ -237,36 +210,19 @@ def resumen_registro(row: pd.Series) -> pd.DataFrame:
     for c in campos:
         if c in row.index:
             v = row[c]
-            # formateo
-            if isinstance(v, (np.floating, float)) and not np.isnan(v):
-                v_show = float(v)
-            elif pd.isna(v):
-                v_show = np.nan
-            else:
-                v_show = v
-            data.append((c, v_show))
+            data.append((c, v))
     return pd.DataFrame(data, columns=["Variable", "Valor"])
 
 
 def construir_modelo_importancia(df_model: pd.DataFrame, target_col: str):
-    """
-    Modelo simple (RandomForest) con OneHot para categóricas.
-    Devuelve importancia global de variables (post one-hot) agregada por variable original.
-    """
-    # Features candidatas: todas excepto fechas y target
     drop_cols = [target_col, "FECHA PODA", "FECHA FIN DE SIEMBRA"]
     X = df_model.drop(columns=[c for c in drop_cols if c in df_model.columns], errors="ignore")
     y = df_model[target_col]
 
-    # Detectar categóricas y numéricas
-    cat_cols = [c for c in X.columns if (c in CATEGORICAS_BASE) or (X[c].dtype == "string") or (X[c].dtype == "object")]
+    cat_cols = [c for c in X.columns if (c in CATEGORICAS_BASE) or (X[c].dtype in ["string", "object"])]
     num_cols = [c for c in X.columns if c not in cat_cols]
 
-    # Preprocesamiento
-    numeric_transformer = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-    ])
-
+    numeric_transformer = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
     categorical_transformer = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="most_frequent")),
         ("onehot", OneHotEncoder(handle_unknown="ignore"))
@@ -284,40 +240,28 @@ def construir_modelo_importancia(df_model: pd.DataFrame, target_col: str):
         n_estimators=250,
         random_state=42,
         n_jobs=-1,
-        max_depth=None,
         min_samples_leaf=5
     )
 
-    pipe = Pipeline(steps=[
-        ("preprocessor", preprocessor),
-        ("model", model)
-    ])
+    pipe = Pipeline(steps=[("preprocessor", preprocessor), ("model", model)])
 
-    # Split (para evitar overfit extremo, aunque aquí solo buscamos importancia)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42
-    )
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
     pipe.fit(X_train, y_train)
 
-    # Sacar nombres de features post onehot
     pre = pipe.named_steps["preprocessor"]
-    ohe = pre.named_transformers_["cat"].named_steps["onehot"]
-
-    # feature names
     feature_names = []
+
     if len(num_cols) > 0:
         feature_names.extend(num_cols)
 
     if len(cat_cols) > 0:
-        cat_feature_names = list(ohe.get_feature_names_out(cat_cols))
-        feature_names.extend(cat_feature_names)
+        ohe = pre.named_transformers_["cat"].named_steps["onehot"]
+        feature_names.extend(list(ohe.get_feature_names_out(cat_cols)))
 
     importances = pipe.named_steps["model"].feature_importances_
     imp_df = pd.DataFrame({"feature": feature_names, "importance": importances})
 
-    # Agregar a variable original (antes del onehot)
     def base_var(f):
-        # ejemplo: "VARIEDAD_SOMETHING" -> "VARIEDAD"
         for c in cat_cols:
             if f.startswith(c + "_"):
                 return c
@@ -326,32 +270,35 @@ def construir_modelo_importancia(df_model: pd.DataFrame, target_col: str):
     imp_df["base_feature"] = imp_df["feature"].apply(base_var)
     imp_agg = imp_df.groupby("base_feature", as_index=False)["importance"].sum().sort_values("importance", ascending=False)
 
-    return imp_agg, pipe
+    return imp_agg
 
 
 # -------------------------
-# SIDEBAR: RUTA Y CARGA
+# UI: SUBIR ARCHIVO
 # -------------------------
-st.sidebar.header("📁 Fuente de datos")
+st.sidebar.header("📁 Cargar Excel")
 
-ruta = st.sidebar.text_input("Ruta del Excel", value=RUTA_DEFAULT)
-hoja = st.sidebar.text_input("Hoja", value=HOJA)
+uploaded_file = st.sidebar.file_uploader(
+    "Sube el Excel consolidado (.xlsx)", type=["xlsx"]
+)
 
-if not os.path.exists(ruta):
-    st.error("No encuentro el archivo en esa ruta. Revisa la ruta o mueve el Excel al lugar correcto.")
+st.sidebar.caption("Requisito: la hoja debe llamarse exactamente **DATA**.")
+
+if uploaded_file is None:
+    st.warning("📌 Sube tu archivo Excel para empezar.")
     st.stop()
 
 with st.spinner("Leyendo Excel..."):
-    df_raw = cargar_data(ruta, hoja)
+    df_raw = cargar_excel(uploaded_file, HOJA)
     validar_columnas(df_raw)
     df = preparar_df(df_raw)
 
-# Filtrado a campañas objetivo (2022–2025) si existe CAMPAÑA
+# Filtrado a campañas objetivo
 if "CAMPAÑA" in df.columns:
     df = df[df["CAMPAÑA"].between(2022, 2025, inclusive="both")]
 
 # -------------------------
-# SIDEBAR: FILTROS
+# FILTROS
 # -------------------------
 st.sidebar.header("🎛️ Filtros")
 
@@ -381,7 +328,6 @@ edadf_sel = st.sidebar.multiselect("EDAD PLANTA FINAL", options=edadf_opts, defa
 siembra_sel = st.sidebar.multiselect("SIEMBRA (Bolsa/Maceta/Suelo)", options=siembra_opts, default=siembra_opts)
 poda_sel = st.sidebar.multiselect("TIPO PODA", options=poda_opts, default=poda_opts)
 
-# Semana rango
 if "SEMANA" in df.columns and df["SEMANA"].notna().any():
     smin = int(df["SEMANA"].dropna().min())
     smax = int(df["SEMANA"].dropna().max())
@@ -405,9 +351,6 @@ if sem_rango is not None:
 
 df_f = filtrar_df(df, filtros)
 
-# -------------------------
-# VALIDACIONES TARGET
-# -------------------------
 if df_f.empty:
     st.warning("Con estos filtros no hay datos.")
     st.stop()
@@ -416,19 +359,15 @@ if "KG/HA" not in df_f.columns:
     st.error("No existe la columna 'KG/HA' y no se pudo calcular. Revisa 'kilogramos' y 'Ha TURNO'.")
     st.stop()
 
-# quitamos registros sin target
 df_f = df_f[df_f["KG/HA"].notna()]
-
 if df_f.empty:
     st.warning("No hay datos con KG/HA válido en estos filtros.")
     st.stop()
-
 
 # -------------------------
 # KPIs
 # -------------------------
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-
 kpi1.metric("Registros filtrados", f"{len(df_f):,}".replace(",", "."))
 kpi2.metric("Promedio KG/HA", f"{df_f['KG/HA'].mean():.2f}")
 kpi3.metric("Máximo KG/HA", f"{df_f['KG/HA'].max():.2f}")
@@ -437,13 +376,12 @@ kpi4.metric("Mínimo KG/HA", f"{df_f['KG/HA'].min():.2f}")
 st.divider()
 
 # -------------------------
-# PANEL MAX / MIN + EXPLICACIÓN ESTRUCTURA/FENOLOGIA
+# MAX / MIN
 # -------------------------
 st.subheader("🔎 Casos extremos (MAX / MIN KG/HA) + su estructura/fenología")
 
 colA, colB = st.columns(2)
 
-# Max
 idx_max = df_f["KG/HA"].idxmax()
 row_max = df_f.loc[idx_max]
 max_table = resumen_registro(row_max)
@@ -453,7 +391,6 @@ with colA:
     st.write(f"**KG/HA = {float(row_max['KG/HA']):.2f}**")
     st.dataframe(max_table, use_container_width=True, height=480)
 
-# Min
 idx_min = df_f["KG/HA"].idxmin()
 row_min = df_f.loc[idx_min]
 min_table = resumen_registro(row_min)
@@ -472,23 +409,16 @@ st.info(
 st.divider()
 
 # -------------------------
-# TENDENCIA SEMANAL
+# CURVA SEMANAL
 # -------------------------
-st.subheader("📈 Curva semanal de KG/HA (y comparación por campaña)")
+st.subheader("📈 Curva semanal de KG/HA (comparación por campaña)")
 
 if "SEMANA" in df_f.columns and "CAMPAÑA" in df_f.columns:
-    # Agregación robusta
-    agg = (df_f
-           .groupby(["CAMPAÑA", "SEMANA"], dropna=False)["KG/HA"]
-           .mean()
+    agg = (df_f.groupby(["CAMPAÑA", "SEMANA"], dropna=False)["KG/HA"].mean()
            .reset_index()
            .sort_values(["CAMPAÑA", "SEMANA"]))
-
-    fig = px.line(
-        agg, x="SEMANA", y="KG/HA", color="CAMPAÑA",
-        markers=True,
-        title="Promedio KG/HA por semana (según filtros)"
-    )
+    fig = px.line(agg, x="SEMANA", y="KG/HA", color="CAMPAÑA", markers=True,
+                  title="Promedio KG/HA por semana (según filtros)")
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.warning("No puedo graficar curva semanal: faltan columnas SEMANA o CAMPAÑA.")
@@ -496,40 +426,27 @@ else:
 st.divider()
 
 # -------------------------
-# DISTRIBUCIÓN + EFECTO SIEMBRA / EDAD
+# DISTRIBUCIÓN / SIEMBRA / EDAD
 # -------------------------
 st.subheader("📊 Distribución de KG/HA y comparaciones clave (SIEMBRA, EDAD PLANTA FINAL)")
 
 c1, c2 = st.columns(2)
-
 with c1:
-    fig_hist = px.histogram(
-        df_f, x="KG/HA", nbins=40,
-        title="Distribución de KG/HA (según filtros)"
-    )
+    fig_hist = px.histogram(df_f, x="KG/HA", nbins=40, title="Distribución de KG/HA")
     st.plotly_chart(fig_hist, use_container_width=True)
 
 with c2:
     if "SIEMBRA" in df_f.columns:
-        fig_box = px.box(
-            df_f, x="SIEMBRA", y="KG/HA",
-            title="KG/HA por SIEMBRA (Bolsa/Maceta/Suelo)"
-        )
+        fig_box = px.box(df_f, x="SIEMBRA", y="KG/HA", title="KG/HA por SIEMBRA")
         st.plotly_chart(fig_box, use_container_width=True)
     else:
         st.warning("No existe SIEMBRA en la data filtrada.")
 
 c3, c4 = st.columns(2)
-
 with c3:
     if "EDAD PLANTA FINAL" in df_f.columns:
-        fig_box2 = px.box(
-            df_f, x="EDAD PLANTA FINAL", y="KG/HA",
-            title="KG/HA por EDAD PLANTA FINAL (1,2,3+)"
-        )
+        fig_box2 = px.box(df_f, x="EDAD PLANTA FINAL", y="KG/HA", title="KG/HA por EDAD PLANTA FINAL")
         st.plotly_chart(fig_box2, use_container_width=True)
-    else:
-        st.warning("No existe EDAD PLANTA FINAL.")
 
 with c4:
     if "VARIEDAD" in df_f.columns:
@@ -538,52 +455,35 @@ with c4:
         tmp = df_f[df_f["VARIEDAD"].isin(top_vars)]
         fig_bar = px.bar(
             tmp.groupby("VARIEDAD")["KG/HA"].mean().reset_index().sort_values("KG/HA", ascending=False),
-            x="VARIEDAD", y="KG/HA",
-            title="Promedio KG/HA por VARIEDAD (Top por frecuencia)"
+            x="VARIEDAD", y="KG/HA", title="Promedio KG/HA por VARIEDAD (Top por frecuencia)"
         )
         fig_bar.update_layout(xaxis_tickangle=-45)
         st.plotly_chart(fig_bar, use_container_width=True)
-    else:
-        st.warning("No existe VARIEDAD.")
 
 st.divider()
 
 # -------------------------
-# CORRELACIONES (solo numéricas) - con criterio de vacíos
+# CORRELACIONES (orientación)
 # -------------------------
 st.subheader("🧠 Señales numéricas rápidas (correlaciones)")
 
-# Solo numéricas (incluye fenología/estructura/brotes) con mínimo de datos
 num_candidates = [
     "KG/HA", "kilogramos", "Ha TURNO", "Ha COSECHADA", "DENSIDAD", "KG/PLANTA"
 ] + FENOLOGIA_CORE + ESTRUCTURA_CORE + BROTES_CORE
-
 num_candidates = [c for c in num_candidates if c in df_f.columns]
 
 df_num = df_f[num_candidates].copy()
-# quedarse con columnas con suficiente data
-valid_cols = []
-for c in df_num.columns:
-    if df_num[c].notna().mean() >= 0.20:  # al menos 20% con datos
-        valid_cols.append(c)
-
+valid_cols = [c for c in df_num.columns if df_num[c].notna().mean() >= 0.20]
 df_num = df_num[valid_cols]
 
 if df_num.shape[1] >= 3:
     corr = df_num.corr(numeric_only=True)
-    # Top correlaciones absolutas con KG/HA
     if "KG/HA" in corr.columns:
-        corr_kg = (corr["KG/HA"].drop("KG/HA").abs().sort_values(ascending=False).head(15))
+        corr_kg = corr["KG/HA"].drop("KG/HA").abs().sort_values(ascending=False).head(15)
         st.write("Top 15 correlaciones absolutas con **KG/HA** (solo orientación; no es causalidad):")
         st.dataframe(corr_kg.reset_index().rename(columns={"index": "Variable", "KG/HA": "|Corr|"}), use_container_width=True)
 
-        fig_corr = go.Figure(
-            data=go.Heatmap(
-                z=corr.values,
-                x=corr.columns,
-                y=corr.columns
-            )
-        )
+        fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns))
         fig_corr.update_layout(title="Mapa de correlaciones (variables numéricas con data suficiente)")
         st.plotly_chart(fig_corr, use_container_width=True)
 else:
@@ -592,19 +492,11 @@ else:
 st.divider()
 
 # -------------------------
-# MODELO: IMPORTANCIA DE VARIABLES (asociación global)
+# IMPORTANCIA MODELO
 # -------------------------
 st.subheader("🏗️ Variables más asociadas a KG/HA (modelo)")
 
-st.caption(
-    "Esto entrena un modelo con las variables disponibles (numéricas + categóricas) "
-    "y calcula importancia global. Sirve para priorizar variables; no prueba causalidad."
-)
-
-# Preparar data model: evitar filas sin target
 df_model = df_f.copy()
-
-# Reducir a columnas relevantes + llaves (evita ruido extremo, pero mantiene potencia)
 cols_model = list(dict.fromkeys(
     ["KG/HA", "AÑO", "CAMPAÑA", "SEMANA"] +
     CATEGORICAS_BASE +
@@ -614,60 +506,27 @@ cols_model = list(dict.fromkeys(
 cols_model = [c for c in cols_model if c in df_model.columns]
 df_model = df_model[cols_model].copy()
 
-# Criterio: si una columna tiene demasiados nulos, se queda igual (el imputador se encarga),
-# pero si es 99% nula, no aporta.
-drop_sparse = []
-for c in df_model.columns:
-    if c == "KG/HA":
-        continue
-    if df_model[c].notna().mean() < 0.01:
-        drop_sparse.append(c)
-
+drop_sparse = [c for c in df_model.columns if c != "KG/HA" and df_model[c].notna().mean() < 0.01]
 if drop_sparse:
     df_model = df_model.drop(columns=drop_sparse)
 
-min_rows_model = 200
-if len(df_model) < min_rows_model:
-    st.warning(f"No entreno modelo porque hay pocos registros ({len(df_model)}). "
-               f"Amplía filtros o baja exigencia mínima en código.")
+if len(df_model) < 200:
+    st.warning(f"No entreno modelo porque hay pocos registros ({len(df_model)}). Amplía filtros.")
 else:
     with st.spinner("Entrenando modelo e importancias..."):
-        imp_agg, pipe = construir_modelo_importancia(df_model, target_col="KG/HA")
+        imp_agg = construir_modelo_importancia(df_model, target_col="KG/HA")
 
     topk = st.slider("Top K variables (importancia)", 10, 40, 20)
     imp_show = imp_agg.head(topk)
 
     cA, cB = st.columns([1, 2])
-
     with cA:
         st.dataframe(imp_show, use_container_width=True, height=520)
 
     with cB:
         fig_imp = px.bar(
             imp_show.sort_values("importance"),
-            x="importance",
-            y="base_feature",
-            orientation="h",
+            x="importance", y="base_feature", orientation="h",
             title="Importancia global (agregada por variable original)"
         )
         st.plotly_chart(fig_imp, use_container_width=True)
-
-    st.success(
-        "Listo. Usa este ranking para enfocar discusión: "
-        "si aparecen SIEMBRA, EDAD PLANTA FINAL, CARGADORES, TERMINALES, FLORES/CUAJA, PESO/CALIBRE, etc., "
-        "son candidatos fuertes a explicar diferencias de KG/HA en 2022–2025."
-    )
-
-# -------------------------
-# EXPORT DE CASOS MAX/MIN (opcional)
-# -------------------------
-st.divider()
-st.subheader("⬇️ Export rápido (casos MAX y MIN)")
-
-export = st.checkbox("Generar Excel de MAX/MIN (en carpeta del app)", value=False)
-if export:
-    out_path = "casos_extremos_max_min_kg_ha.xlsx"
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        max_table.to_excel(writer, sheet_name="MAX_KG_HA", index=False)
-        min_table.to_excel(writer, sheet_name="MIN_KG_HA", index=False)
-    st.success(f"Generado: {out_path} (queda en la misma carpeta donde corres Streamlit).")
