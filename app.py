@@ -1,10 +1,23 @@
 # app.py
-# ============================================================
-# DASHBOARD: Drivers fenológicos/estructura asociados a KG/HA
-# Fuente: Excel subido por el usuario | Hoja: "DATA"
-# ============================================================
+# ==========================================================
+# DASH: Fenología y estructura vs rendimiento (KG/HA)
+# - Carga por uploader (xlsx) | Hoja: DATA
+# - Filtros: Fundo, Etapa, Campo, Turno, Variedad, Semana, Campaña
+# - Métricas:
+#   * KG = SUMA(kilogramos)  (sin ponderar)
+#   * KG/HA, PESO, CALIBRE = promedios ponderados por Ha COSECHADA
+#   * Área ejecutada = SUMA(Ha COSECHADA)
+# - Scatter: Y = (KG/HA / PESO / CALIBRE) ponderado, X = otras variables
+# - Boxplots: por SIEMBRA y por EDAD PLANTA FINAL (1,2,3+)
+# - Curva semanal: KG/HA ponderado por Ha COSECHADA
+# - Variedades: ranking ponderado + heatmap VS por campaña
+# - Best/Worst TURNO dentro de (CAMPAÑA + VARIEDAD) con ETAPA/CAMPO + estructura
+# - Correlaciones: solo columnas solicitadas
+# - Importancia (modelo): RandomForest + permutation importance (agregado por variable base)
+# - Vista adicional: FLORES vs FRUTO CUAJADO (% cuajado)
+# ==========================================================
 
-import re
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,383 +28,302 @@ import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
 
+# --------------------------
+# CONFIG
+# --------------------------
+st.set_page_config(page_title="Fenología vs rendimiento", layout="wide")
 
-# -------------------------
-# CONFIG STREAMLIT
-# -------------------------
-st.set_page_config(page_title="Fenología vs Rendimiento (KG/HA)", layout="wide")
-st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
+REQ_SHEET = "DATA"
 
-
-# -------------------------
-# PARAMETROS / DICCIONARIOS
-# -------------------------
-HOJA = "DATA"
-
-COLUMNAS_ESPERADAS = [
+COLS_REQUIRED = [
     "AÑO", "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
-    "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "Ha COSECHADA", "Ha TURNO",
-    "KG/HA", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
-    "PESO BAYA (g)", "PESO BAYA CREMOSO (g)", "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
-    "SEMANA DE SIEMBRA", "FECHA FIN DE SIEMBRA", "TIPO PODA", "FECHA PODA",
-    "MADERAS PRINCIPALES", "CARGADORES", "N° RAMAS VEGETATIVAS", "RAMAS TOTALES", "TERMINALES",
-    "EDAD PLANTA", "EDAD PLANTA FINAL",
-    "BP_N_BROTES_ULT", "BP_LONG_B1_ULT", "BP_LONG_B2_ULT", "BP_DIAM_B1_ULT", "BP_DIAM_B2_ULT",
-    "BS_N_BROTES_ULT", "BS_LONG_B1_ULT", "BS_LONG_B2_ULT", "BS_DIAM_B1_ULT", "BS_DIAM_B2_ULT",
-    "BT_N_BROTES_ULT", "BT_LONG_B1_ULT", "BT_LONG_B2_ULT", "BT_DIAM_B1_ULT", "BT_DIAM_B2_ULT",
-    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT", "SIEMBRA"
+    "kilogramos", "FLORES", "FRUTO CUAJADO", "Ha COSECHADA", "Ha TURNO",
+    "KG/HA", "DENSIDAD", "FRUTO MADURO", "PESO BAYA (g)", "CALIBRE BAYA (mm)",
+    "SEMANA DE SIEMBRA", "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES",
+    "TERMINALES", "EDAD PLANTA", "EDAD PLANTA FINAL", "SIEMBRA"
 ]
 
-CATEGORICAS_BASE = [
-    "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "TIPO PODA", "SIEMBRA", "EDAD PLANTA FINAL"
+# Ponderaciones
+W_COL = "Ha COSECHADA"
+
+METRIC_Y_OPTIONS = {
+    "KG/HA": "KG/HA",
+    "PESO BAYA (g)": "PESO BAYA (g)",
+    "CALIBRE BAYA (mm)": "CALIBRE BAYA (mm)",
+}
+
+STRUCT_COLS = {
+    "MADERAS PRINCIPALES": "MADERAS PRINCIPALES",
+    "CORTES (antes CARGADORES)": "CORTES",
+    "BROTES TOTALES (antes RAMAS TOTALES)": "BROTES TOTALES",
+}
+
+# Para correlaciones (SOLO estas)
+CORR_COLS = [
+    "KG/HA",
+    "kilogramos",
+    "FLORES",
+    "Ha COSECHADA",
+    "DENSIDAD",
+    "FRUTO MADURO",
+    "PESO BAYA (g)",
+    "CALIBRE BAYA (mm)",
+    "SEMANA DE SIEMBRA",
+    "MADERAS PRINCIPALES",
+    "CORTES",
+    "BROTES TOTALES",
+    "TERMINALES",
+    "EDAD PLANTA",
 ]
 
-FENOLOGIA_CORE = [
-    "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "FRUTO CREMOSO", "FRUTO ROSADO", "FRUTO MADURO",
-    "PESO BAYA (g)", "CALIBRE BAYA (mm)", "PESO BAYA CREMOSO (g)", "CALIBRE CREMOSO (mm)"
-]
-
-ESTRUCTURA_CORE = [
-    "MADERAS PRINCIPALES", "CARGADORES", "RAMAS TOTALES", "TERMINALES",
-    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
-]
-
-BROTES_CORE = [
-    "BP_N_BROTES_ULT", "BP_LONG_B1_ULT", "BP_LONG_B2_ULT", "BP_DIAM_B1_ULT", "BP_DIAM_B2_ULT",
-    "BS_N_BROTES_ULT", "BS_LONG_B1_ULT", "BS_LONG_B2_ULT", "BS_DIAM_B1_ULT", "BS_DIAM_B2_ULT",
-    "BT_N_BROTES_ULT", "BT_LONG_B1_ULT", "BT_LONG_B2_ULT", "BT_DIAM_B1_ULT", "BT_DIAM_B2_ULT",
-]
-
-
-# -------------------------
-# UTILIDADES
-# -------------------------
-def _to_numeric_safe(s: pd.Series) -> pd.Series:
+# --------------------------
+# HELPERS
+# --------------------------
+def to_numeric_safe(s: pd.Series) -> pd.Series:
+    """Convierte a numérico de forma segura."""
     return pd.to_numeric(s, errors="coerce")
 
-
-def _normalize_edad_final(x):
-    if pd.isna(x):
+def weighted_mean(x: pd.Series, w: pd.Series) -> float:
+    x = pd.to_numeric(x, errors="coerce")
+    w = pd.to_numeric(w, errors="coerce")
+    mask = x.notna() & w.notna() & (w > 0)
+    if mask.sum() == 0:
         return np.nan
-    x_str = str(x).strip()
-    # normaliza "3" / "3+" / "3 +"
-    if re.match(r"^3\s*\+?$", x_str) or "3+" in x_str:
-        return "3+"
-    if x_str in ["1", "1.0", "01"]:
-        return "1"
-    if x_str in ["2", "2.0", "02"]:
-        return "2"
-    return x_str
+    return float(np.average(x[mask], weights=w[mask]))
 
-
-def _smart_nan_for_zeros(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    """
-    Heurística: si una columna es casi todo 0 y casi no hay positivos,
-    interpretamos 0 como 'no evaluado' y lo pasamos a NaN.
-    """
-    out = df.copy()
-    for c in cols:
-        if c not in out.columns:
-            continue
-        if not pd.api.types.is_numeric_dtype(out[c]):
-            continue
-
-        s = out[c]
-        nn = s.notna().sum()
-        if nn == 0:
-            continue
-
-        zeros = (s == 0).sum()
-        pos = (s > 0).sum()
-
-        if zeros / nn > 0.85 and pos / nn < 0.10:
-            out.loc[out[c] == 0, c] = np.nan
-    return out
-
-
-def wavg(series: pd.Series, weights: pd.Series) -> float:
-    """Promedio ponderado robusto."""
-    s = pd.to_numeric(series, errors="coerce")
-    w = pd.to_numeric(weights, errors="coerce")
-    m = s.notna() & w.notna() & (w > 0)
-    if m.sum() == 0:
-        return np.nan
-    return float((s[m] * w[m]).sum() / w[m].sum())
-
-
-@st.cache_data(show_spinner=False)
-def cargar_excel(uploaded_file, hoja: str) -> pd.DataFrame:
-    df = pd.read_excel(uploaded_file, sheet_name=hoja)
-    df.columns = [str(c).strip() for c in df.columns]
+def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
+    # EDAD PLANTA FINAL debe ser 1,2,3+ (string)
+    if "EDAD PLANTA FINAL" in df.columns:
+        df["EDAD PLANTA FINAL"] = df["EDAD PLANTA FINAL"].astype(str).str.strip()
+        # normaliza posibles 3, 3.0 -> 3+
+        df.loc[df["EDAD PLANTA FINAL"].isin(["3", "3.0", "3.00"]), "EDAD PLANTA FINAL"] = "3+"
+        order = ["1", "2", "3+"]
+        df["EDAD PLANTA FINAL"] = pd.Categorical(df["EDAD PLANTA FINAL"], categories=order, ordered=True)
     return df
 
+@st.cache_data(show_spinner=False)
+def read_excel(file_bytes: bytes, sheet: str) -> pd.DataFrame:
+    bio = io.BytesIO(file_bytes)
+    df = pd.read_excel(bio, sheet_name=sheet)
+    return df
 
-def validar_columnas(df: pd.DataFrame):
-    faltantes = [c for c in COLUMNAS_ESPERADAS if c not in df.columns]
-    if faltantes:
-        st.warning("⚠️ Columnas esperadas NO encontradas (revisa nombres exactos en tu Excel):")
-        st.write(faltantes)
+def validate_cols(df: pd.DataFrame) -> list:
+    missing = [c for c in COLS_REQUIRED if c not in df.columns]
+    return missing
 
+def apply_filters(df: pd.DataFrame,
+                  camp, fundo, etapa, campo, turno, variedad,
+                  semana_min, semana_max):
+    dff = df.copy()
 
-def preparar_df(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
+    if camp:
+        dff = dff[dff["CAMPAÑA"].isin(camp)]
+    if fundo:
+        dff = dff[dff["FUNDO"].isin(fundo)]
+    if etapa:
+        dff = dff[dff["ETAPA"].isin(etapa)]
+    if campo:
+        dff = dff[dff["CAMPO"].isin(campo)]
+    if turno:
+        dff = dff[dff["TURNO"].isin(turno)]
+    if variedad:
+        dff = dff[dff["VARIEDAD"].isin(variedad)]
 
-    # enteros (semana/año/campaña)
-    for c in ["AÑO", "CAMPAÑA", "SEMANA"]:
-        if c in d.columns:
-            d[c] = _to_numeric_safe(d[c]).astype("Int64")
+    dff = dff[(dff["SEMANA"] >= semana_min) & (dff["SEMANA"] <= semana_max)]
+    return dff
 
-    # strings categóricas
-    for c in CATEGORICAS_BASE:
-        if c in d.columns:
-            d[c] = d[c].astype("string").str.strip()
+def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
+    # KG = suma kilogramos (sin ponderar)
+    # KG/HA, PESO, CALIBRE = ponderado por Ha COSECHADA
+    # Área ejecutada = suma Ha COSECHADA
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "CAMPAÑA", "KG", "KG/HA", "PESO BAYA (g)", "CALIBRE BAYA (mm)", "ÁREA EJECUTADA (Ha COSECHADA)"
+        ])
 
-    if "EDAD PLANTA FINAL" in d.columns:
-        d["EDAD PLANTA FINAL"] = d["EDAD PLANTA FINAL"].apply(_normalize_edad_final).astype("string")
-
-    # fechas
-    for c in ["FECHA PODA", "FECHA FIN DE SIEMBRA"]:
-        if c in d.columns:
-            d[c] = pd.to_datetime(d[c], errors="coerce")
-
-    # numéricas
-    llaves = ["AÑO", "CAMPAÑA", "SEMANA"] + CATEGORICAS_BASE + ["EDAD PLANTA"]
-    num_cols = [c for c in d.columns if c not in llaves and c not in ["FECHA PODA", "FECHA FIN DE SIEMBRA"]]
-
-    for c in num_cols:
-        d[c] = _to_numeric_safe(d[c])
-
-    # KG/HA si faltara, intentamos calcular
-    if "KG/HA" not in d.columns:
-        d["KG/HA"] = np.nan
-
-    if "kilogramos" in d.columns and "Ha TURNO" in d.columns:
-        mask_nan = d["KG/HA"].isna()
-        denom = d["Ha TURNO"].replace({0: np.nan})
-        d.loc[mask_nan, "KG/HA"] = d.loc[mask_nan, "kilogramos"] / denom
-
-    # KG/PLANTA
-    if "DENSIDAD" in d.columns and "Ha TURNO" in d.columns and "kilogramos" in d.columns:
-        plantas = d["Ha TURNO"].replace({0: np.nan}) * d["DENSIDAD"].replace({0: np.nan})
-        d["KG/PLANTA"] = d["kilogramos"] / plantas
-    else:
-        d["KG/PLANTA"] = np.nan
-
-    # limpiar 0s sospechosos
-    candidatos_zeros_missing = (
-        ESTRUCTURA_CORE + BROTES_CORE + [
-            "PESO BAYA (g)", "PESO BAYA CREMOSO (g)",
-            "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
-        ]
-    )
-    d = _smart_nan_for_zeros(d, candidatos_zeros_missing)
-
-    return d
-
-
-def filtrar_df(d: pd.DataFrame, filtros: dict) -> pd.DataFrame:
-    out = d.copy()
-    for col, val in filtros.items():
-        if val is None or col not in out.columns:
-            continue
-        if isinstance(val, tuple) and len(val) == 2:
-            lo, hi = val
-            out = out[(out[col].notna()) & (out[col] >= lo) & (out[col] <= hi)]
-        elif isinstance(val, list):
-            if len(val) > 0:
-                out = out[out[col].isin(val)]
-        else:
-            out = out[out[col] == val]
-    return out
-
-
-def agg_campaign_table(df_f: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tabla por campaña:
-      - KG = suma kilogramos
-      - KG/HA ponderado por Ha COSECHADA
-      - PESO, CALIBRE ponderados por Ha COSECHADA
-    """
-    out_rows = []
-    for camp, g in df_f.groupby("CAMPAÑA", dropna=False):
-        kg_sum = float(pd.to_numeric(g.get("kilogramos"), errors="coerce").sum())
-        ha_w = g.get("Ha COSECHADA")
-        kg_ha_w = wavg(g.get("KG/HA"), ha_w)
-        peso_w = wavg(g.get("PESO BAYA (g)"), ha_w)
-        calibre_w = wavg(g.get("CALIBRE BAYA (mm)"), ha_w)
-
-        out_rows.append({
-            "CAMPAÑA": int(camp) if pd.notna(camp) else camp,
-            "KG": kg_sum,
-            "KG/HA (pond Ha COSECHADA)": kg_ha_w,
-            "PESO (g) (pond Ha COSECHADA)": peso_w,
-            "CALIBRE (mm) (pond Ha COSECHADA)": calibre_w,
+    out = []
+    for camp, g in df.groupby("CAMPAÑA", dropna=False):
+        out.append({
+            "CAMPAÑA": str(camp),
+            "KG": float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True)),
+            "KG/HA": weighted_mean(g["KG/HA"], g[W_COL]),
+            "PESO BAYA (g)": weighted_mean(g["PESO BAYA (g)"], g[W_COL]),
+            "CALIBRE BAYA (mm)": weighted_mean(g["CALIBRE BAYA (mm)"], g[W_COL]),
+            "ÁREA EJECUTADA (Ha COSECHADA)": float(pd.to_numeric(g[W_COL], errors="coerce").sum(skipna=True)),
         })
+    res = pd.DataFrame(out)
+    # orden por campaña como categoría
+    res["CAMPAÑA"] = pd.Categorical(res["CAMPAÑA"], categories=sorted(res["CAMPAÑA"].unique()), ordered=True)
+    res = res.sort_values("CAMPAÑA").reset_index(drop=True)
+    return res
 
-    out = pd.DataFrame(out_rows).sort_values("CAMPAÑA")
-    return out
-
-
-def agg_weekly(df_f: pd.DataFrame) -> pd.DataFrame:
+def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str) -> pd.DataFrame:
     """
-    Serie semanal por campaña:
-    KG/HA ponderado por Ha COSECHADA
+    Agrega a nivel (level_cols) y produce:
+      - y_pond: promedio ponderado por Ha COSECHADA del y_col
+      - w_sum: suma Ha COSECHADA
+      - kg_sum: suma kilogramos (solo por control)
     """
-    rows = []
-    for (camp, sem), g in df_f.groupby(["CAMPAÑA", "SEMANA"], dropna=False):
-        kg_ha_w = wavg(g["KG/HA"], g["Ha COSECHADA"])
-        rows.append({"CAMPAÑA": camp, "SEMANA": sem, "KG/HA_pond": kg_ha_w})
-    return pd.DataFrame(rows).dropna(subset=["SEMANA"]).sort_values(["CAMPAÑA", "SEMANA"])
-
-
-def agg_cat_weighted(df_f: pd.DataFrame, cat_col: str, value_col: str = "KG/HA") -> pd.DataFrame:
-    """
-    Promedio ponderado (por Ha COSECHADA) por categoría.
-    """
-    rows = []
-    for cat, g in df_f.groupby(cat_col, dropna=False):
-        rows.append({
-            cat_col: cat,
-            f"{value_col}_pond": wavg(g[value_col], g["Ha COSECHADA"]),
-            "Ha COSECHADA (sum)": float(pd.to_numeric(g["Ha COSECHADA"], errors="coerce").fillna(0).sum()),
-            "n": int(len(g))
-        })
-    out = pd.DataFrame(rows).sort_values(f"{value_col}_pond", ascending=False)
-    return out
-
-
-def agg_variety_rank(df_f: pd.DataFrame, topN: int) -> pd.DataFrame:
-    rows = []
-    for var, g in df_f.groupby("VARIEDAD", dropna=False):
-        rows.append({
-            "VARIEDAD": var,
-            "KG/HA_pond": wavg(g["KG/HA"], g["Ha COSECHADA"]),
-            "Ha COSECHADA (sum)": float(pd.to_numeric(g["Ha COSECHADA"], errors="coerce").fillna(0).sum()),
-            "n": int(len(g))
-        })
-    out = pd.DataFrame(rows).dropna(subset=["VARIEDAD"])
-    out = out.sort_values(["KG/HA_pond", "Ha COSECHADA (sum)"], ascending=False).head(topN)
-    return out
-
-
-def agg_variety_vs_campaign(df_f: pd.DataFrame, topN_vars: int = 15) -> pd.DataFrame:
-    """
-    Heatmap Variedad x Campaña (KG/HA ponderado).
-    Para no saturar, se limita a topN_vars por frecuencia.
-    """
-    top_vars = df_f["VARIEDAD"].value_counts().head(topN_vars).index.tolist()
-    tmp = df_f[df_f["VARIEDAD"].isin(top_vars)].copy()
+    if df.empty:
+        cols = level_cols + ["y_pond", "w_sum", "kg_sum"]
+        return pd.DataFrame(columns=cols)
 
     rows = []
-    for (var, camp), g in tmp.groupby(["VARIEDAD", "CAMPAÑA"], dropna=False):
-        rows.append({
-            "VARIEDAD": var,
-            "CAMPAÑA": camp,
-            "KG/HA_pond": wavg(g["KG/HA"], g["Ha COSECHADA"])
-        })
+    for keys, g in df.groupby(level_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        rec = {col: keys[i] for i, col in enumerate(level_cols)}
+        rec["y_pond"] = weighted_mean(g[y_col], g[W_COL])
+        rec["w_sum"] = float(pd.to_numeric(g[W_COL], errors="coerce").sum(skipna=True))
+        rec["kg_sum"] = float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True))
+        rows.append(rec)
     return pd.DataFrame(rows)
 
-
-def turnos_max_min_por_var_camp(df_f: pd.DataFrame, variedad: str):
+def best_worst_turno_by_campaign_variety(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Para una VARIEDAD:
-    por cada CAMPAÑA -> encuentra TURNO MAX y TURNO MIN según KG/HA ponderado por Ha COSECHADA
-    y devuelve tabla + datos para graficar (best vs worst).
+    Dentro del df filtrado:
+    - Agrega a nivel TURNO (incluye ETAPA y CAMPO para contexto) dentro de (CAMPAÑA, VARIEDAD)
+    - Calcula KG/HA ponderado y estructura ponderada
+    - Devuelve:
+      1) tabla best/worst por (CAMPAÑA, VARIEDAD)
+      2) dataset TURNO-level para graficar (max/min)
     """
-    tmp = df_f[df_f["VARIEDAD"] == variedad].copy()
-    if tmp.empty:
-        return None, None
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
-    # agregamos a nivel CAMPAÑA+VARIEDAD+TURNO
-    g_rows = []
-    group_cols = ["CAMPAÑA", "VARIEDAD", "TURNO"]
-    need_cols = ["KG/HA", "Ha COSECHADA", "MADERAS PRINCIPALES", "CARGADORES", "RAMAS TOTALES"]
+    level = ["CAMPAÑA", "VARIEDAD", "ETAPA", "CAMPO", "TURNO"]
 
-    for (camp, var, turno), g in tmp.groupby(group_cols, dropna=False):
-        ha_w = g["Ha COSECHADA"]
-        g_rows.append({
-            "CAMPAÑA": camp,
-            "VARIEDAD": var,
-            "TURNO": turno,
-            "KG/HA_pond": wavg(g["KG/HA"], ha_w),
-            "MADERAS PRINCIPALES": wavg(g["MADERAS PRINCIPALES"], ha_w),
-            "CARGADORES": wavg(g["CARGADORES"], ha_w),
-            "RAMAS TOTALES": wavg(g["RAMAS TOTALES"], ha_w),
-            "Ha COSECHADA (sum)": float(pd.to_numeric(ha_w, errors="coerce").fillna(0).sum()),
-            "n": int(len(g))
-        })
+    agg = aggregate_level(df, level, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
+    # estructura ponderada
+    for lab, col in STRUCT_COLS.items():
+        tmp = aggregate_level(df, level, col)[["CAMPAÑA", "VARIEDAD", "ETAPA", "CAMPO", "TURNO", "y_pond"]].rename(columns={"y_pond": f"{col}_pond"})
+        agg = agg.merge(tmp, on=level, how="left")
 
-    agg = pd.DataFrame(g_rows).dropna(subset=["KG/HA_pond"])
-    if agg.empty:
-        return None, None
-
+    # best/worst por (CAMPAÑA, VARIEDAD)
     out_rows = []
-    plot_rows = []
-    for camp, gc in agg.groupby("CAMPAÑA", dropna=False):
-        gc2 = gc.dropna(subset=["KG/HA_pond"])
-        if gc2.empty:
+    for (camp, var), g in agg.groupby(["CAMPAÑA", "VARIEDAD"], dropna=False):
+        g2 = g.dropna(subset=["KG/HA_pond"]).copy()
+        if g2.empty:
             continue
-        best = gc2.loc[gc2["KG/HA_pond"].idxmax()]
-        worst = gc2.loc[gc2["KG/HA_pond"].idxmin()]
+        g2 = g2.sort_values("KG/HA_pond", ascending=False)
+
+        best = g2.iloc[0]
+        worst = g2.iloc[-1]
 
         out_rows.append({
-            "CAMPAÑA": camp,
+            "CAMPAÑA": str(camp),
+            "VARIEDAD": var,
             "TURNO_MAX": best["TURNO"],
+            "ETAPA_MAX": best["ETAPA"],
+            "CAMPO_MAX": best["CAMPO"],
             "KG/HA_MAX (pond)": best["KG/HA_pond"],
-            "MADERAS_MAX": best["MADERAS PRINCIPALES"],
-            "CARGADORES_MAX": best["CARGADORES"],
-            "RAMAS_TOTALES_MAX": best["RAMAS TOTALES"],
+            "MADERAS (pond)": best.get("MADERAS PRINCIPALES_pond", np.nan),
+            "CORTES (pond)": best.get("CORTES_pond", np.nan),
+            "BROTES TOTALES (pond)": best.get("BROTES TOTALES_pond", np.nan),
+
             "TURNO_MIN": worst["TURNO"],
+            "ETAPA_MIN": worst["ETAPA"],
+            "CAMPO_MIN": worst["CAMPO"],
             "KG/HA_MIN (pond)": worst["KG/HA_pond"],
-            "MADERAS_MIN": worst["MADERAS PRINCIPALES"],
-            "CARGADORES_MIN": worst["CARGADORES"],
-            "RAMAS_TOTALES_MIN": worst["RAMAS TOTALES"],
         })
 
-        for label, row in [("MAX", best), ("MIN", worst)]:
-            plot_rows.append({
-                "CAMPAÑA": camp,
-                "EXTREMO": label,
-                "TURNO": row["TURNO"],
-                "KG/HA_pond": row["KG/HA_pond"],
-                "MADERAS PRINCIPALES": row["MADERAS PRINCIPALES"],
-                "CARGADORES": row["CARGADORES"],
-                "RAMAS TOTALES": row["RAMAS TOTALES"],
-            })
+    out = pd.DataFrame(out_rows)
+    return out, agg
 
-    out_table = pd.DataFrame(out_rows).sort_values("CAMPAÑA")
-    plot_df = pd.DataFrame(plot_rows).sort_values(["CAMPAÑA", "EXTREMO"])
-    return out_table, plot_df
+def corr_heatmap(df: pd.DataFrame) -> go.Figure:
+    dd = df.copy()
+    use = [c for c in CORR_COLS if c in dd.columns]
+    dd = dd[use]
 
+    # numeric coercion
+    for c in use:
+        dd[c] = to_numeric_safe(dd[c])
 
-def construir_modelo_importancia(df_model: pd.DataFrame, target_col: str):
+    # drop cols with too few non-null
+    keep = [c for c in use if dd[c].notna().sum() >= 20]
+    dd = dd[keep]
+    if dd.shape[1] < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="No hay suficientes columnas numéricas con data para correlación.", showarrow=False)
+        return fig
+
+    corr = dd.corr(numeric_only=True)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=corr.values,
+            x=corr.columns.tolist(),
+            y=corr.index.tolist(),
+            colorbar=dict(title="corr"),
+        )
+    )
+    fig.update_layout(
+        height=600,
+        margin=dict(l=10, r=10, t=30, b=10),
+        title="Mapa de correlaciones (solo columnas solicitadas)",
+    )
+    return fig
+
+def model_importance(df: pd.DataFrame, target="KG/HA") -> pd.DataFrame:
     """
-    Modelo: RandomForestRegressor
-    - Numéricas: imputación mediana
-    - Categóricas: imputación moda + OneHot
-    - Importancias: feature_importances_ y luego agregación por variable original
+    Modelo orientativo (NO causal):
+    - RandomForestRegressor
+    - Preprocess: imputación + onehot categóricas
+    - Importancia: permutation_importance en test
+    - Agrega importancia por variable base (antes de onehot)
     """
-    drop_cols = [target_col, "FECHA PODA", "FECHA FIN DE SIEMBRA"]
-    X = df_model.drop(columns=[c for c in drop_cols if c in df_model.columns], errors="ignore")
-    y = df_model[target_col]
+    if df.empty:
+        return pd.DataFrame(columns=["base_feature", "importance_mean"])
 
-    cat_cols = [c for c in X.columns if (c in CATEGORICAS_BASE) or (X[c].dtype in ["string", "object"])]
+    d = df.copy()
+
+    if target not in d.columns:
+        return pd.DataFrame(columns=["base_feature", "importance_mean"])
+
+    # target numérico
+    d[target] = to_numeric_safe(d[target])
+    d = d.dropna(subset=[target])
+    if len(d) < 200:
+        # si es muy chico, igual corre pero avisamos más abajo en UI
+        pass
+
+    # features candidatas: num + cat (excluye identificadores muy finos si quieres)
+    feature_cols = [
+        "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
+        "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+        "Ha COSECHADA", "Ha TURNO", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
+        "PESO BAYA (g)", "CALIBRE BAYA (mm)", "SEMANA DE SIEMBRA",
+        "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+        "EDAD PLANTA", "EDAD PLANTA FINAL", "SIEMBRA"
+    ]
+    feature_cols = [c for c in feature_cols if c in d.columns]
+
+    X = d[feature_cols].copy()
+    y = d[target].copy()
+
+    # separar tipos
+    cat_cols = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
     num_cols = [c for c in X.columns if c not in cat_cols]
 
-    numeric_transformer = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
-    categorical_transformer = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(handle_unknown="ignore"))
-    ])
+    # coerción num
+    for c in num_cols:
+        X[c] = to_numeric_safe(X[c])
 
-    preprocessor = ColumnTransformer(
+    # pipeline
+    pre = ColumnTransformer(
         transformers=[
-            ("num", numeric_transformer, num_cols),
-            ("cat", categorical_transformer, cat_cols)
+            ("num", Pipeline(steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+            ]), num_cols),
+            ("cat", Pipeline(steps=[
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("oh", OneHotEncoder(handle_unknown="ignore")),
+            ]), cat_cols),
         ],
         remainder="drop"
     )
@@ -400,458 +332,496 @@ def construir_modelo_importancia(df_model: pd.DataFrame, target_col: str):
         n_estimators=250,
         random_state=42,
         n_jobs=-1,
-        min_samples_leaf=5
+        max_depth=None
     )
 
-    pipe = Pipeline(steps=[("preprocessor", preprocessor), ("model", model)])
+    pipe = Pipeline(steps=[("pre", pre), ("model", model)])
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+
     pipe.fit(X_train, y_train)
 
-    pre = pipe.named_steps["preprocessor"]
+    # nombres de features después de onehot
+    oh = pipe.named_steps["pre"].named_transformers_["cat"].named_steps["oh"] if cat_cols else None
     feature_names = []
+    feature_base = []
 
-    if len(num_cols) > 0:
-        feature_names.extend(num_cols)
+    # num
+    for c in num_cols:
+        feature_names.append(c)
+        feature_base.append(c)
 
-    if len(cat_cols) > 0:
-        ohe = pre.named_transformers_["cat"].named_steps["onehot"]
-        feature_names.extend(list(ohe.get_feature_names_out(cat_cols)))
+    # cat onehot
+    if cat_cols and oh is not None:
+        oh_names = oh.get_feature_names_out(cat_cols)
+        feature_names.extend(list(oh_names))
+        feature_base.extend([n.split("_")[0] for n in oh_names])
 
-    importances = pipe.named_steps["model"].feature_importances_
-    imp_df = pd.DataFrame({"feature": feature_names, "importance": importances})
-
-    def base_var(f):
-        for c in cat_cols:
-            if f.startswith(c + "_"):
-                return c
-        return f
-
-    imp_df["base_feature"] = imp_df["feature"].apply(base_var)
-    imp_agg = (
-        imp_df.groupby("base_feature", as_index=False)["importance"].sum()
-        .sort_values("importance", ascending=False)
+    # permutation importance
+    r = permutation_importance(
+        pipe, X_test, y_test,
+        n_repeats=10,
+        random_state=42,
+        n_jobs=-1
     )
 
-    return imp_agg
+    imp = pd.DataFrame({
+        "feature": feature_names,
+        "base_feature": feature_base,
+        "importance_mean": r.importances_mean
+    })
 
+    # agrega por variable base
+    agg = (
+        imp.groupby("base_feature", dropna=False)["importance_mean"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
 
-# -------------------------
-# UI: SUBIR ARCHIVO
-# -------------------------
-st.sidebar.header("📁 Cargar Excel")
+    return agg
 
-uploaded_file = st.sidebar.file_uploader(
-    "Sube el Excel consolidado (.xlsx)", type=["xlsx"]
-)
+# --------------------------
+# UI: HEADER + UPLOADER
+# --------------------------
+st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
 
-st.sidebar.caption("Requisito: la hoja debe llamarse exactamente **DATA**.")
+with st.sidebar:
+    st.header("📦 Cargar Excel")
+    up = st.file_uploader("Sube el Excel consolidado (.xlsx)", type=["xlsx"])
+    st.caption(f"Requisito: la hoja debe llamarse exactamente **{REQ_SHEET}**.")
 
-if uploaded_file is None:
+if up is None:
     st.info("📌 Sube tu archivo Excel para empezar.")
     st.stop()
 
-with st.spinner("Leyendo Excel..."):
-    df_raw = cargar_excel(uploaded_file, HOJA)
-    validar_columnas(df_raw)
-    df = preparar_df(df_raw)
+# --------------------------
+# LOAD
+# --------------------------
+df_raw = read_excel(up.getvalue(), REQ_SHEET)
 
-# Filtrado a campañas objetivo (2022-2025)
-if "CAMPAÑA" in df.columns:
-    df = df[df["CAMPAÑA"].between(2022, 2025, inclusive="both")]
-
-# Validación mínima
-for must in ["CAMPAÑA", "SEMANA", "KG/HA", "Ha COSECHADA"]:
-    if must not in df.columns:
-        st.error(f"Falta columna obligatoria para este dashboard: '{must}'")
-        st.stop()
-
-df = df[df["KG/HA"].notna()].copy()
-df = df[df["Ha COSECHADA"].notna()].copy()
-
-if df.empty:
-    st.warning("No hay datos con KG/HA y Ha COSECHADA válidos.")
+missing = validate_cols(df_raw)
+if missing:
+    st.error("Faltan columnas requeridas en tu hoja DATA:")
+    st.write(missing)
     st.stop()
 
+df = df_raw.copy()
 
-# -------------------------
-# FILTROS
-# -------------------------
-st.sidebar.header("🎛️ Filtros")
+# Tipos básicos
+df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
+# CAMPAÑA la uso como etiqueta (string) para evitar 2022.5 en gráficos
+df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
 
-def _opts(col):
-    if col not in df.columns:
-        return []
-    return sorted([x for x in df[col].dropna().unique().tolist()])
+# columnas numéricas clave
+num_main = [
+    "kilogramos", "KG/HA", "Ha COSECHADA", "Ha TURNO",
+    "PESO BAYA (g)", "CALIBRE BAYA (mm)",
+    "FLORES", "FRUTO CUAJADO", "DENSIDAD", "FRUTO MADURO",
+    "SEMANA DE SIEMBRA",
+    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+    "EDAD PLANTA",
+]
+for c in num_main:
+    if c in df.columns:
+        df[c] = to_numeric_safe(df[c])
 
-camp_opts = _opts("CAMPAÑA")
-fundo_opts = _opts("FUNDO")
-etapa_opts = _opts("ETAPA")
-campo_opts = _opts("CAMPO")
-turno_opts = _opts("TURNO")
-var_opts = _opts("VARIEDAD")
-edadf_opts = _opts("EDAD PLANTA FINAL")
-siembra_opts = _opts("SIEMBRA")
-poda_opts = _opts("TIPO PODA")
+df = ensure_categories_age(df)
 
-camp_sel = st.sidebar.multiselect("CAMPAÑA", options=camp_opts, default=camp_opts)
-fundo_sel = st.sidebar.multiselect("FUNDO", options=fundo_opts, default=fundo_opts)
-etapa_sel = st.sidebar.multiselect("ETAPA", options=etapa_opts, default=etapa_opts)
-campo_sel = st.sidebar.multiselect("CAMPO", options=campo_opts, default=campo_opts)
-turno_sel = st.sidebar.multiselect("TURNO", options=turno_opts, default=turno_opts)
-var_sel = st.sidebar.multiselect("VARIEDAD", options=var_opts, default=var_opts)
+# --------------------------
+# FILTERS
+# --------------------------
+with st.sidebar:
+    st.header("🎛️ Filtros")
 
-edadf_sel = st.sidebar.multiselect("EDAD PLANTA FINAL", options=edadf_opts, default=edadf_opts)
-siembra_sel = st.sidebar.multiselect("SIEMBRA (Bolsa/Maceta/Suelo)", options=siembra_opts, default=siembra_opts)
-poda_sel = st.sidebar.multiselect("TIPO PODA", options=poda_opts, default=poda_opts)
+    def ms(col):
+        vals = sorted([v for v in df[col].dropna().unique().tolist()])
+        return st.multiselect(col, vals, default=[])
 
-if "SEMANA" in df.columns and df["SEMANA"].notna().any():
-    smin = int(df["SEMANA"].dropna().min())
-    smax = int(df["SEMANA"].dropna().max())
-    sem_rango = st.sidebar.slider("Rango de SEMANA", min_value=smin, max_value=smax, value=(smin, smax))
-else:
-    sem_rango = None
+    camp_f = ms("CAMPAÑA")
+    fundo_f = ms("FUNDO")
+    etapa_f = ms("ETAPA")
+    campo_f = ms("CAMPO")
+    turno_f = ms("TURNO")
+    variedad_f = ms("VARIEDAD")
 
-filtros = {
-    "CAMPAÑA": camp_sel,
-    "FUNDO": fundo_sel,
-    "ETAPA": etapa_sel,
-    "CAMPO": campo_sel,
-    "TURNO": turno_sel,
-    "VARIEDAD": var_sel,
-    "EDAD PLANTA FINAL": edadf_sel,
-    "SIEMBRA": siembra_sel,
-    "TIPO PODA": poda_sel,
-}
-if sem_rango is not None:
-    filtros["SEMANA"] = sem_rango
+    sem_min, sem_max = int(df["SEMANA"].min()), int(df["SEMANA"].max())
+    semana_range = st.slider("SEMANA (rango)", sem_min, sem_max, (sem_min, sem_max))
+    smin, smax = semana_range
 
-df_f = filtrar_df(df, filtros)
+dff = apply_filters(df, camp_f, fundo_f, etapa_f, campo_f, turno_f, variedad_f, smin, smax)
 
-if df_f.empty:
-    st.warning("Con estos filtros no hay datos.")
-    st.stop()
-
-
-# ============================================================
-# 1) TABLA RESUMEN POR CAMPAÑA (reemplaza KPIs)
-# ============================================================
+# --------------------------
+# RESUMEN POR CAMPAÑA
+# --------------------------
 st.subheader("Resumen por campaña (ponderado por Ha COSECHADA)")
-tabla_camp = agg_campaign_table(df_f)
 
-# formato
-tabla_show = tabla_camp.copy()
-for c in ["KG", "KG/HA (pond Ha COSECHADA)", "PESO (g) (pond Ha COSECHADA)", "CALIBRE (mm) (pond Ha COSECHADA)"]:
-    if c in tabla_show.columns:
-        tabla_show[c] = tabla_show[c].astype(float).round(2)
+res_camp = campaign_summary(dff)
+st.dataframe(
+    res_camp.style.format({
+        "KG": "{:,.2f}",
+        "KG/HA": "{:,.2f}",
+        "PESO BAYA (g)": "{:,.2f}",
+        "CALIBRE BAYA (mm)": "{:,.2f}",
+        "ÁREA EJECUTADA (Ha COSECHADA)": "{:,.2f}",
+    }),
+    use_container_width=True
+)
 
-st.dataframe(tabla_show, use_container_width=True, height=220)
+# --------------------------
+# FLORES vs CUAJADO (vista nueva)
+# --------------------------
+st.subheader("Flores vs Cuajado (conversión)")
 
-# Opcional: gráfico rápido (KG/HA pond por campaña)
-fig_camp = px.bar(tabla_camp, x="CAMPAÑA", y="KG/HA (pond Ha COSECHADA)",
-                  title="KG/HA ponderado por Ha COSECHADA (por campaña)")
-st.plotly_chart(fig_camp, use_container_width=True)
+c1, c2, c3, c4 = st.columns(4)
+flores_sum = float(pd.to_numeric(dff["FLORES"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
+cuaj_sum = float(pd.to_numeric(dff["FRUTO CUAJADO"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
+ratio = (cuaj_sum / flores_sum) if flores_sum > 0 else np.nan
+no_cuaj = 1 - ratio if pd.notna(ratio) else np.nan
 
-st.divider()
+c1.metric("FLORES (suma)", f"{flores_sum:,.0f}")
+c2.metric("FRUTO CUAJADO (suma)", f"{cuaj_sum:,.0f}")
+c3.metric("% Cuajado", f"{ratio*100:,.2f}%" if pd.notna(ratio) else "NA")
+c4.metric("% No cuajó", f"{no_cuaj*100:,.2f}%" if pd.notna(no_cuaj) else "NA")
 
-
-# ============================================================
-# 8) SCATTER (tipo imagen 11): X vs KG/HA ponderado por nivel
-# ============================================================
-st.subheader("Dispersión (X vs KG/HA ponderado) + BEST/WORST")
-
-# Variables X numéricas elegibles (evitar categóricas)
-cand_x = [
-    "FLORES", "FRUTO MADURO", "PESO BAYA (g)", "CALIBRE BAYA (mm)",
-    "DENSIDAD", "Ha COSECHADA", "kilogramos",
-    "MADERAS PRINCIPALES", "CARGADORES", "RAMAS TOTALES", "TERMINALES",
-    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT",
-] + BROTES_CORE
-cand_x = [c for c in cand_x if c in df_f.columns]
-
-if len(cand_x) == 0:
-    st.warning("No hay variables numéricas disponibles para el scatter con estos filtros.")
-else:
-    col_sc1, col_sc2 = st.columns([1, 3])
-
-    with col_sc1:
-        nivel = st.selectbox("Nivel de agregación", ["TURNO", "CAMPO", "VARIEDAD"], index=0)
-        x_var = st.selectbox("Variable X", cand_x, index=0)
-
-    # Definir group_cols según nivel
-    if nivel == "TURNO":
-        group_cols = ["CAMPAÑA", "VARIEDAD", "TURNO"]
-    elif nivel == "CAMPO":
-        group_cols = ["CAMPAÑA", "VARIEDAD", "CAMPO"]
-    else:
-        group_cols = ["CAMPAÑA", "VARIEDAD"]
-
-    # Agregación ponderada
-    rows = []
-    for keys, g in df_f.groupby(group_cols, dropna=False):
-        keys = keys if isinstance(keys, tuple) else (keys,)
-        row = dict(zip(group_cols, keys))
-        row["KG/HA_pond"] = wavg(g["KG/HA"], g["Ha COSECHADA"])
-        row[x_var] = wavg(g[x_var], g["Ha COSECHADA"])
-        rows.append(row)
-
-    sc = pd.DataFrame(rows).dropna(subset=["KG/HA_pond", x_var])
-
-    if sc.empty:
-        st.warning("No hay puntos suficientes para el scatter en este nivel.")
-    else:
-        # best / worst global en el nivel elegido
-        idx_best = sc["KG/HA_pond"].idxmax()
-        idx_worst = sc["KG/HA_pond"].idxmin()
-        sc["POINT"] = "NORMAL"
-        sc.loc[idx_best, "POINT"] = "BEST"
-        sc.loc[idx_worst, "POINT"] = "WORST"
-
-        with col_sc2:
-            fig_sc = px.scatter(
-                sc,
-                x=x_var, y="KG/HA_pond",
-                color="POINT",
-                hover_data=group_cols + ["KG/HA_pond", x_var],
-                title=f"{x_var} vs KG/HA (ponderado por Ha COSECHADA) | Nivel: {nivel}"
-            )
-            st.plotly_chart(fig_sc, use_container_width=True)
-
-st.divider()
-
-
-# ============================================================
-# 2) MAX/MIN por TURNO dentro de (CAMPAÑA + VARIEDAD)
-#    -> NO APLICA si TURNO fue fijado (no todos seleccionados)
-# ============================================================
-st.subheader("Best vs Worst TURNO dentro de (CAMPAÑA + VARIEDAD)")
-
-turno_fijado = (len(turno_sel) < len(turno_opts))  # si eligió menos que todo, consideramos fijado
-if turno_fijado:
-    st.warning("No aplica: ya fijaste TURNO en los filtros.")
-else:
-    if len(var_sel) != 1:
-        st.info("Para esta vista, selecciona **1 sola VARIEDAD** en el filtro (VARIEDAD).")
-    else:
-        variedad_obj = var_sel[0]
-        out_table, plot_df = turnos_max_min_por_var_camp(df_f, variedad_obj)
-
-        if out_table is None or out_table.empty:
-            st.warning("No se pudo calcular MAX/MIN por TURNO para esa variedad con los filtros actuales.")
-        else:
-            st.markdown(f"**VARIEDAD:** {variedad_obj}")
-            st.dataframe(out_table, use_container_width=True)
-
-            # Gráfico estilo “barras + líneas” por campaña (MAX y MIN)
-            # Barras: KG/HA_pond, Líneas: estructura
-            for camp in sorted(plot_df["CAMPAÑA"].dropna().unique().tolist()):
-                sub = plot_df[plot_df["CAMPAÑA"] == camp].copy()
-                if sub.empty:
-                    continue
-
-                x_labels = [f"{variedad_obj}<br>{r['EXTREMO']}<br>{r['TURNO']}" for _, r in sub.iterrows()]
-
-                fig = go.Figure()
-
-                # barra kg/ha
-                fig.add_trace(go.Bar(
-                    x=x_labels,
-                    y=sub["KG/HA_pond"],
-                    name="KG/HA (pond)",
-                ))
-
-                # líneas estructura (eje secundario)
-                fig.add_trace(go.Scatter(
-                    x=x_labels, y=sub["MADERAS PRINCIPALES"], mode="lines+markers",
-                    name="MADERAS PRINCIPALES", yaxis="y2"
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_labels, y=sub["CARGADORES"], mode="lines+markers",
-                    name="CARGADORES", yaxis="y2"
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_labels, y=sub["RAMAS TOTALES"], mode="lines+markers",
-                    name="RAMAS TOTALES", yaxis="y2"
-                ))
-
-                fig.update_layout(
-                    title=f"KG/HA MAX vs MIN (por TURNO) + Estructura | CAMPAÑA {camp}",
-                    xaxis_title="Extremos por turno",
-                    yaxis_title="KG/HA (ponderado)",
-                    yaxis2=dict(title="Estructura (pond)", overlaying="y", side="right"),
-                    legend=dict(orientation="h"),
-                    bargap=0.35
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-
-# ============================================================
-# 3) Curva semanal KG/HA ponderado por Ha COSECHADA
-# ============================================================
-st.subheader("Curva semanal de KG/HA (ponderado por Ha COSECHADA)")
-
-weekly = agg_weekly(df_f)
-weekly = weekly.dropna(subset=["SEMANA", "KG/HA_pond"])
-
-if weekly.empty:
-    st.warning("No hay datos suficientes para curva semanal.")
-else:
-    fig_week = px.line(
-        weekly, x="SEMANA", y="KG/HA_pond", color="CAMPAÑA",
-        markers=True, title="KG/HA ponderado por semana (según filtros)"
+# por campaña (ratio = sum(cuaj)/sum(flores))
+if not dff.empty:
+    tmp = (
+        dff.groupby("CAMPAÑA", dropna=False)
+        .agg(FLORES=("FLORES", "sum"), CUAJ=("FRUTO CUAJADO", "sum"))
+        .reset_index()
     )
-    st.plotly_chart(fig_week, use_container_width=True)
+    tmp["%_CUAJADO"] = np.where(tmp["FLORES"] > 0, tmp["CUAJ"] / tmp["FLORES"], np.nan) * 100
+    fig_cuaj = px.bar(tmp, x="CAMPAÑA", y="%_CUAJADO", title="% Cuajado por campaña (sum Cuaj / sum Flores)")
+    fig_cuaj.update_layout(xaxis=dict(type="category"))
+    st.plotly_chart(fig_cuaj, use_container_width=True)
 
 st.divider()
 
+# --------------------------
+# SCATTER: X vs MÉTRICA Y (ponderada) + BEST/WORST (global dentro del nivel)
+# --------------------------
+st.subheader("Dispersión (X vs métrica ponderada) + BEST/WORST")
 
-# ============================================================
-# 4) SIEMBRA y EDAD FINAL (ambos ponderados) +  KG/PLANTA vs campañas
-# ============================================================
-st.subheader("Comparaciones ponderadas (Ha COSECHADA): SIEMBRA, EDAD PLANTA FINAL y KG/PLANTA")
+left, right = st.columns([0.28, 0.72])
 
-cA, cB = st.columns(2)
+with left:
+    y_label = st.selectbox("Métrica Y (ponderada por Ha COSECHADA)", list(METRIC_Y_OPTIONS.keys()), index=0)
+    y_col = METRIC_Y_OPTIONS[y_label]
 
-with cA:
-    if "SIEMBRA" in df_f.columns:
-        si = agg_cat_weighted(df_f, "SIEMBRA", "KG/HA")
-        fig_si = px.bar(si, x="SIEMBRA", y="KG/HA_pond", title="KG/HA ponderado por SIEMBRA")
-        st.plotly_chart(fig_si, use_container_width=True)
-    else:
-        st.warning("No existe SIEMBRA en la data.")
+    # variables X: resto de numéricas (excluye Y y pesos)
+    numeric_candidates = []
+    for c in dff.columns:
+        if c in [y_col, W_COL]:
+            continue
+        if pd.api.types.is_numeric_dtype(dff[c]):
+            numeric_candidates.append(c)
 
-with cB:
-    if "EDAD PLANTA FINAL" in df_f.columns:
-        ed = agg_cat_weighted(df_f, "EDAD PLANTA FINAL", "KG/HA")
-        # orden 1,2,3+
-        orden = ["1", "2", "3+"]
-        ed["EDAD PLANTA FINAL"] = ed["EDAD PLANTA FINAL"].astype("string")
-        ed["ord"] = ed["EDAD PLANTA FINAL"].apply(lambda x: orden.index(x) if x in orden else 99)
-        ed = ed.sort_values("ord")
-        fig_ed = px.bar(ed, x="EDAD PLANTA FINAL", y="KG/HA_pond", title="KG/HA ponderado por EDAD PLANTA FINAL")
-        st.plotly_chart(fig_ed, use_container_width=True)
-    else:
-        st.warning("No existe EDAD PLANTA FINAL en la data.")
+    # ordena y filtra algunas
+    preferred = ["FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS", "DENSIDAD", "FRUTO MADURO",
+                 "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA", "SEMANA DE SIEMBRA"]
+    ordered = [c for c in preferred if c in numeric_candidates] + [c for c in sorted(numeric_candidates) if c not in preferred]
 
-# KG/PLANTA vs campañas (ponderado por Ha COSECHADA)
-if "KG/PLANTA" in df_f.columns and df_f["KG/PLANTA"].notna().any():
+    x_col = st.selectbox("Variable X", ordered, index=0 if ordered else 0)
+
+with right:
+    # Agrega al nivel TURNO (para dispersión más interpretable)
+    level = ["TURNO"]
+    agg_sc = aggregate_level(dff, level, y_col).rename(columns={"y_pond": "Y_pond"})
+    if x_col:
+        tmpx = aggregate_level(dff, level, x_col)[["TURNO", "y_pond"]].rename(columns={"y_pond": "X_pond"})
+        agg_sc = agg_sc.merge(tmpx, on="TURNO", how="left")
+
+    # marca best/worst (por Y_pond)
+    agg_sc["POINT"] = "NORMAL"
+    if not agg_sc.empty and agg_sc["Y_pond"].notna().any():
+        idx_best = agg_sc["Y_pond"].idxmax()
+        idx_worst = agg_sc["Y_pond"].idxmin()
+        agg_sc.loc[idx_best, "POINT"] = "BEST"
+        agg_sc.loc[idx_worst, "POINT"] = "WORST"
+
+    title_sc = f"{x_col} vs {y_label} | Nivel: TURNO"
+    fig_sc = px.scatter(
+        agg_sc,
+        x="X_pond" if "X_pond" in agg_sc.columns else None,
+        y="Y_pond",
+        hover_data=["TURNO", "w_sum", "kg_sum", "POINT"],
+        color="POINT",
+        title=title_sc,
+    )
+    fig_sc.update_layout(xaxis_title=x_col, yaxis_title=f"{y_label} (ponderado)")
+    st.plotly_chart(fig_sc, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# CURVA SEMANAL: KG/HA ponderado por Ha COSECHADA, comparación por campaña
+# --------------------------
+st.subheader("Curva semanal de KG/HA (comparación por campaña)")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    # promedio ponderado por semana y campaña
     rows = []
-    for camp, g in df_f.groupby("CAMPAÑA", dropna=False):
+    for (camp, sem), g in dff.groupby(["CAMPAÑA", "SEMANA"], dropna=False):
         rows.append({
-            "CAMPAÑA": camp,
-            "KG/PLANTA_pond": wavg(g["KG/PLANTA"], g["Ha COSECHADA"])
+            "CAMPAÑA": str(camp),
+            "SEMANA": int(sem),
+            "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL]),
         })
-    kgp = pd.DataFrame(rows).sort_values("CAMPAÑA").dropna()
-    fig_kgp = px.line(kgp, x="CAMPAÑA", y="KG/PLANTA_pond", markers=True, title="KG/PLANTA ponderado (Ha COSECHADA) vs campañas")
-    st.plotly_chart(fig_kgp, use_container_width=True)
+    wk = pd.DataFrame(rows).sort_values(["CAMPAÑA", "SEMANA"])
+    fig_wk = px.line(
+        wk, x="SEMANA", y="KG/HA_pond", color="CAMPAÑA",
+        markers=True,
+        title="Promedio KG/HA por semana (ponderado por Ha COSECHADA)"
+    )
+    fig_wk.update_layout(xaxis=dict(dtick=1))
+    st.plotly_chart(fig_wk, use_container_width=True)
 
 st.divider()
 
+# --------------------------
+# BOXPLOTS: SIEMBRA y EDAD PLANTA FINAL (ponderado)
+# --------------------------
+st.subheader("KG/HA ponderado: Boxplot por SIEMBRA y por EDAD PLANTA FINAL")
 
-# ============================================================
-# 5) VARIEDAD: ranking ponderado + VS por campañas (heatmap)
-# ============================================================
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    # construye dataset a nivel "unidad" = TURNO (para boxplot estable)
+    turn_level = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "SIEMBRA", "EDAD PLANTA FINAL"]
+    agg_turn = aggregate_level(dff, turn_level, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
+    # limpia nulos
+    agg_turn = agg_turn.dropna(subset=["KG/HA_pond"])
+
+    b1, b2 = st.columns(2)
+
+    with b1:
+        fig_siem = px.box(
+            agg_turn,
+            x="SIEMBRA",
+            y="KG/HA_pond",
+            points="outliers",
+            title="KG/HA ponderado por SIEMBRA (boxplot)"
+        )
+        fig_siem.update_layout(xaxis=dict(type="category"))
+        st.plotly_chart(fig_siem, use_container_width=True)
+
+    with b2:
+        # EDAD PLANTA FINAL ordenado 1,2,3+
+        agg_turn["EDAD PLANTA FINAL"] = agg_turn["EDAD PLANTA FINAL"].astype(str)
+        order_age = ["1", "2", "3+"]
+        fig_age = px.box(
+            agg_turn,
+            x="EDAD PLANTA FINAL",
+            y="KG/HA_pond",
+            category_orders={"EDAD PLANTA FINAL": order_age},
+            points="outliers",
+            title="KG/HA ponderado por EDAD PLANTA FINAL (boxplot)"
+        )
+        fig_age.update_layout(xaxis=dict(type="category"))
+        st.plotly_chart(fig_age, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# KG/PLANTA vs CAMPAÑA (ponderado por Ha COSECHADA) - (si existe)
+# --------------------------
+if "KG/PLANTA" in dff.columns:
+    st.subheader("KG/PLANTA ponderado (Ha COSECHADA) vs campañas")
+    tmp = []
+    for camp, g in dff.groupby("CAMPAÑA", dropna=False):
+        tmp.append({"CAMPAÑA": str(camp), "KG/PLANTA_pond": weighted_mean(g["KG/PLANTA"], g[W_COL])})
+    tmp = pd.DataFrame(tmp)
+    fig_kp = px.line(tmp, x="CAMPAÑA", y="KG/PLANTA_pond", markers=True, title="KG/PLANTA ponderado vs CAMPAÑA")
+    fig_kp.update_layout(xaxis=dict(type="category"))
+    st.plotly_chart(fig_kp, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# VARIEDADES: ranking ponderado + VS por campañas (heatmap)
+# --------------------------
 st.subheader("Variedades: ranking (KG/HA ponderado) + VS por campañas")
 
-cV1, cV2 = st.columns([1, 2])
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    top_n = st.slider("Top N variedades (por frecuencia)", 5, 25, 10)
 
-with cV1:
-    topN = st.slider("Top N variedades por frecuencia", 5, 25, 10)
-    var_rank = agg_variety_rank(df_f, topN=topN)
-    st.dataframe(var_rank, use_container_width=True, height=520)
+    # Agrega a nivel TURNO para estabilidad
+    level_var = ["VARIEDAD", "CAMPAÑA"]
+    agg_v = aggregate_level(dff, level_var, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
+    agg_v["CAMPAÑA"] = agg_v["CAMPAÑA"].astype(str)
 
-with cV2:
-    fig_v = px.bar(
-        var_rank.sort_values("KG/HA_pond", ascending=True),
-        x="KG/HA_pond", y="VARIEDAD", orientation="h",
+    # frecuencia aproximada: cuenta de turnos
+    freq = (
+        dff.groupby("VARIEDAD")["TURNO"]
+        .count()
+        .sort_values(ascending=False)
+        .reset_index()
+        .rename(columns={"TURNO": "n"})
+    )
+
+    # promedio ponderado global por variedad (ponderado por Ha COSECHADA dentro de variedad)
+    rows = []
+    for var, g in dff.groupby("VARIEDAD", dropna=False):
+        rows.append({"VARIEDAD": var, "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL])})
+    avg_var = pd.DataFrame(rows).merge(freq, on="VARIEDAD", how="left").fillna({"n": 0})
+    avg_var = avg_var.sort_values("n", ascending=False).head(top_n)
+
+    fig_rank = px.bar(
+        avg_var.sort_values("KG/HA_pond", ascending=True),
+        x="KG/HA_pond", y="VARIEDAD",
+        orientation="h",
         title="Promedio KG/HA ponderado (Top variedades por frecuencia)"
     )
-    st.plotly_chart(fig_v, use_container_width=True)
+    st.plotly_chart(fig_rank, use_container_width=True)
 
-# VS por campaña (heatmap)
-hm = agg_variety_vs_campaign(df_f, topN_vars=min(15, max(10, topN)))
-if not hm.empty:
-    fig_hm = px.density_heatmap(
-        hm, x="CAMPAÑA", y="VARIEDAD", z="KG/HA_pond",
+    # heatmap VS variedad x campaña usando top variedades
+    top_vars = avg_var["VARIEDAD"].tolist()
+    hm = agg_v[agg_v["VARIEDAD"].isin(top_vars)].copy()
+    pivot = hm.pivot_table(index="VARIEDAD", columns="CAMPAÑA", values="KG/HA_pond", aggfunc="mean")
+    pivot = pivot.reindex(index=top_vars)
+
+    fig_hm = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=[str(c) for c in pivot.columns],
+            y=pivot.index.tolist(),
+            colorbar=dict(title="avg KG/HA_pond"),
+        )
+    )
+    fig_hm.update_layout(
         title="VS: VARIEDAD x CAMPAÑA (KG/HA ponderado)",
-        histfunc="avg"
+        height=420,
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(type="category")
     )
     st.plotly_chart(fig_hm, use_container_width=True)
 
 st.divider()
 
+# --------------------------
+# BEST vs WORST TURNO dentro de (CAMPAÑA + VARIEDAD) + gráfico estilo Excel
+# --------------------------
+st.subheader("Best vs Worst TURNO dentro de (CAMPAÑA + VARIEDAD)")
 
-# ============================================================
-# 6) CORRELACIONES (solo heatmap y solo columnas indicadas)
-# ============================================================
-st.subheader("Mapa de correlaciones (solo variables seleccionadas)")
-
-corr_cols = [
-    "KG/HA", "kilogramos", "FLORES", "Ha COSECHADA", "DENSIDAD", "FRUTO MADURO",
-    "PESO BAYA (g)", "CALIBRE BAYA (mm)", "SEMANA DE SIEMBRA",
-    "MADERAS PRINCIPALES", "CARGADORES", "RAMAS TOTALES", "TERMINALES", "EDAD PLANTA"
-]
-corr_cols = [c for c in corr_cols if c in df_f.columns]
-
-df_corr = df_f[corr_cols].copy()
-for c in df_corr.columns:
-    df_corr[c] = pd.to_numeric(df_corr[c], errors="coerce")
-
-# Mantener columnas con data suficiente
-valid_cols = [c for c in df_corr.columns if df_corr[c].notna().mean() >= 0.20]
-df_corr = df_corr[valid_cols]
-
-if df_corr.shape[1] < 3:
-    st.warning("No hay suficientes columnas con data para correlación (con estos filtros).")
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
 else:
-    corr = df_corr.corr(numeric_only=True)
-    fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns))
-    fig_corr.update_layout(title="Mapa de correlaciones (variables con data suficiente)")
-    st.plotly_chart(fig_corr, use_container_width=True)
+    vars_available = sorted(dff["VARIEDAD"].dropna().unique().tolist())
+    var_pick = st.selectbox("Selecciona VARIEDAD", vars_available, index=0 if vars_available else 0)
+
+    d_var = dff[dff["VARIEDAD"] == var_pick].copy()
+
+    bw_table, turno_level = best_worst_turno_by_campaign_variety(d_var)
+
+    if bw_table.empty:
+        st.info("No se pudo calcular best/worst con los datos actuales.")
+    else:
+        st.dataframe(
+            bw_table.style.format({
+                "KG/HA_MAX (pond)": "{:,.4f}",
+                "KG/HA_MIN (pond)": "{:,.4f}",
+                "MADERAS (pond)": "{:,.4f}",
+                "CORTES (pond)": "{:,.4f}",
+                "BROTES TOTALES (pond)": "{:,.4f}",
+            }),
+            use_container_width=True
+        )
+
+        # gráfico: por campaña (si hay varias) mostramos selector campaña
+        camps = sorted(bw_table["CAMPAÑA"].unique().tolist())
+        camp_pick = st.selectbox("Campaña para gráfico", camps, index=len(camps)-1 if camps else 0)
+
+        row = bw_table[bw_table["CAMPAÑA"] == camp_pick].iloc[0]
+
+        # construye 2 puntos: MAX y MIN
+        cats = [
+            f"MAX | {row['TURNO_MAX']} ({row['ETAPA_MAX']}-{row['CAMPO_MAX']})",
+            f"MIN | {row['TURNO_MIN']} ({row['ETAPA_MIN']}-{row['CAMPO_MIN']})",
+        ]
+        kgvals = [row["KG/HA_MAX (pond)"], row["KG/HA_MIN (pond)"]]
+
+        maderas = [row["MADERAS (pond)"], np.nan]
+        cortes = [row["CORTES (pond)"], np.nan]
+        brotes = [row["BROTES TOTALES (pond)"], np.nan]
+
+        # Para el MIN también queremos la estructura promedio ponderada del turno min
+        # la buscamos en turno_level (turno-level incluye estructura ponderada por turno)
+        tl = turno_level.copy()
+        tl["CAMPAÑA"] = tl["CAMPAÑA"].astype(str)
+
+        # best record
+        rec_best = tl[(tl["CAMPAÑA"] == camp_pick) & (tl["VARIEDAD"] == var_pick) & (tl["TURNO"] == row["TURNO_MAX"]) &
+                      (tl["ETAPA"] == row["ETAPA_MAX"]) & (tl["CAMPO"] == row["CAMPO_MAX"])].head(1)
+        rec_worst = tl[(tl["CAMPAÑA"] == camp_pick) & (tl["VARIEDAD"] == var_pick) & (tl["TURNO"] == row["TURNO_MIN"]) &
+                       (tl["ETAPA"] == row["ETAPA_MIN"]) & (tl["CAMPO"] == row["CAMPO_MIN"])].head(1)
+
+        if not rec_best.empty:
+            maderas[0] = rec_best["MADERAS PRINCIPALES_pond"].iloc[0]
+            cortes[0] = rec_best["CORTES_pond"].iloc[0]
+            brotes[0] = rec_best["BROTES TOTALES_pond"].iloc[0]
+        if not rec_worst.empty:
+            maderas[1] = rec_worst["MADERAS PRINCIPALES_pond"].iloc[0]
+            cortes[1] = rec_worst["CORTES_pond"].iloc[0]
+            brotes[1] = rec_worst["BROTES TOTALES_pond"].iloc[0]
+
+        fig_bw = go.Figure()
+
+        # barras KG/HA
+        fig_bw.add_trace(go.Bar(
+            x=cats, y=kgvals, name="KG/HA (ponderado)",
+            yaxis="y1"
+        ))
+
+        # líneas estructura (eje secundario)
+        fig_bw.add_trace(go.Scatter(x=cats, y=maderas, mode="lines+markers", name="MADERAS PRINCIPALES (pond)", yaxis="y2"))
+        fig_bw.add_trace(go.Scatter(x=cats, y=cortes, mode="lines+markers", name="CORTES (pond)", yaxis="y2"))
+        fig_bw.add_trace(go.Scatter(x=cats, y=brotes, mode="lines+markers", name="BROTES TOTALES (pond)", yaxis="y2"))
+
+        fig_bw.update_layout(
+            title=f"KG/HA MAX vs MIN (por TURNO) + Estructura | CAMPAÑA {camp_pick} | VARIEDAD {var_pick}",
+            xaxis=dict(type="category"),
+            yaxis=dict(title="KG/HA (ponderado)"),
+            yaxis2=dict(title="Estructura (pond)", overlaying="y", side="right"),
+            legend=dict(orientation="h"),
+            height=520
+        )
+        st.plotly_chart(fig_bw, use_container_width=True)
 
 st.divider()
 
+# --------------------------
+# CORRELACIONES (solo columnas solicitadas)
+# --------------------------
+st.subheader("Mapa de correlaciones (solo columnas seleccionadas)")
 
-# ============================================================
-# 7) MODELO (IMPORTANCIAS) - se mantiene
-# ============================================================
+fig_corr = corr_heatmap(dff)
+st.plotly_chart(fig_corr, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# MODELO: VARIABLES MÁS ASOCIADAS (importancia)
+# --------------------------
 st.subheader("Variables más asociadas a KG/HA (modelo)")
 
-df_model = df_f.copy()
-cols_model = list(dict.fromkeys(
-    ["KG/HA", "AÑO", "CAMPAÑA", "SEMANA"] +
-    CATEGORICAS_BASE +
-    ["kilogramos", "Ha TURNO", "Ha COSECHADA", "DENSIDAD", "KG/PLANTA"] +
-    ESTRUCTURA_CORE + FENOLOGIA_CORE + BROTES_CORE
-))
-cols_model = [c for c in cols_model if c in df_model.columns]
-df_model = df_model[cols_model].copy()
+top_k = st.slider("Top K variables (importancia)", 10, 40, 20)
 
-# Drop columnas ultra-sparse
-drop_sparse = [c for c in df_model.columns if c != "KG/HA" and df_model[c].notna().mean() < 0.01]
-if drop_sparse:
-    df_model = df_model.drop(columns=drop_sparse)
+imp_df = model_importance(dff, target="KG/HA")
 
-if len(df_model) < 200:
-    st.warning(f"No entreno modelo porque hay pocos registros ({len(df_model)}). Amplía filtros.")
+if imp_df.empty:
+    st.info("No se pudo entrenar el modelo con los datos actuales (revisa filtros / cantidad).")
 else:
-    with st.spinner("Entrenando modelo e importancias..."):
-        imp_agg = construir_modelo_importancia(df_model, target_col="KG/HA")
-
-    topk = st.slider("Top K variables (importancia)", 10, 40, 20)
-    imp_show = imp_agg.head(topk)
-
-    cM1, cM2 = st.columns([1, 2])
-    with cM1:
-        st.dataframe(imp_show, use_container_width=True, height=520)
-
-    with cM2:
-        fig_imp = px.bar(
-            imp_show.sort_values("importance"),
-            x="importance", y="base_feature", orientation="h",
-            title="Importancia global (agregada por variable original)"
-        )
-        st.plotly_chart(fig_imp, use_container_width=True)
+    show = imp_df.head(top_k).copy()
+    fig_imp = px.bar(
+        show.sort_values("importance_mean", ascending=True),
+        x="importance_mean", y="base_feature",
+        orientation="h",
+        title="Importancia global (agregada por variable original)"
+    )
+    st.plotly_chart(fig_imp, use_container_width=True)
+    st.caption("Nota: esto es orientativo (asociación), no implica causalidad.")
