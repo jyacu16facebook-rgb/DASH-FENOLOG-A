@@ -1,7 +1,7 @@
 # app.py
 # ==========================================================
 # DASH: Fenología y estructura vs rendimiento (KG/HA)
-# - Carga por uploader (xlsx) | Hoja: DATA
+# - Carga AUTOMÁTICA desde archivo local en repo (xlsx) | Hoja: DATA
 # - Filtros: Fundo, Etapa, Campo, Turno, Variedad, Semana, Campaña, EDAD PLANTA FINAL
 # - Métricas:
 #   * KG = SUMA(kilogramos)  (sin ponderar)
@@ -13,11 +13,15 @@
 # - Variedades: ranking ponderado + heatmap VS por campaña
 # - Best/Worst TURNO dentro de (CAMPAÑA + VARIEDAD) con ETAPA/CAMPO + estructura (promedios ponderados)
 # - Correlaciones: solo columnas solicitadas
-# - Importancia (modelo): RandomForest + permutation importance (agregado por variable base)
 # - Vista adicional: FLORES vs FRUTO CUAJADO (% cuajado, cap a 100%)
 # - Vista adicional: KG/PLANTA ponderado vs campañas (si no existe, se calcula con KG/HA y DENSIDAD)
+#
+# ✅ CAMBIOS PEDIDOS:
+#   (1) Se elimina la sección "Variables más asociadas a KG/HA (modelo)"
+#   (2) Se elimina uploader; se carga directo desde el Excel que está en el repo
 # ==========================================================
 
+import os
 import io
 import numpy as np
 import pandas as pd
@@ -26,20 +30,15 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-from sklearn.model_selection import train_test_split
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.inspection import permutation_importance
-
 # --------------------------
 # CONFIG
 # --------------------------
 st.set_page_config(page_title="Fenología vs rendimiento", layout="wide")
 
 REQ_SHEET = "DATA"
+
+# ✅ Archivo Excel que está en tu repo (misma carpeta que app.py)
+DATA_FILE = "CONSOLIDADO 2022-2026.xlsx"
 
 COLS_REQUIRED = [
     "AÑO", "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
@@ -108,9 +107,8 @@ def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @st.cache_data(show_spinner=False)
-def read_excel(file_bytes: bytes, sheet: str) -> pd.DataFrame:
-    bio = io.BytesIO(file_bytes)
-    return pd.read_excel(bio, sheet_name=sheet)
+def read_excel_path(path: str, sheet: str) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet)
 
 def validate_cols(df: pd.DataFrame) -> list:
     return [c for c in COLS_REQUIRED if c not in df.columns]
@@ -139,7 +137,6 @@ def apply_filters(df: pd.DataFrame,
     return dff
 
 def _sort_campaign_categories(campaign_series: pd.Series):
-    # ordena campañas numéricamente si se puede (2022,2023,...)
     uniq = campaign_series.dropna().astype(str).unique().tolist()
     def to_int_or_big(x):
         try:
@@ -150,9 +147,6 @@ def _sort_campaign_categories(campaign_series: pd.Series):
     return uniq_sorted
 
 def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
-    # KG = suma kilogramos (sin ponderar)
-    # KG/HA, PESO, CALIBRE = ponderado por Ha COSECHADA
-    # Área ejecutada = suma Ha COSECHADA
     if df.empty:
         return pd.DataFrame(columns=[
             "CAMPAÑA", "KG", "KG/HA", "PESO BAYA (g)", "CALIBRE BAYA (mm)", "ÁREA EJECUTADA (Ha COSECHADA)"
@@ -175,12 +169,6 @@ def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     return res.sort_values("CAMPAÑA").reset_index(drop=True)
 
 def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str) -> pd.DataFrame:
-    """
-    Agrega a nivel (level_cols) y produce:
-      - y_pond: promedio ponderado por Ha COSECHADA del y_col
-      - w_sum: suma Ha COSECHADA
-      - kg_sum: suma kilogramos (control)
-    """
     if df.empty:
         return pd.DataFrame(columns=level_cols + ["y_pond", "w_sum", "kg_sum"])
 
@@ -196,18 +184,12 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str) -> pd.DataFr
     return pd.DataFrame(rows)
 
 def best_worst_turno_by_campaign_variety(df: pd.DataFrame):
-    """
-    Dentro del df filtrado:
-    - Agrega a nivel TURNO (incluye ETAPA y CAMPO para contexto) dentro de (CAMPAÑA, VARIEDAD)
-    - Calcula KG/HA ponderado y estructura ponderada (promedios ponderados)
-    """
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     level = ["CAMPAÑA", "VARIEDAD", "ETAPA", "CAMPO", "TURNO"]
     agg = aggregate_level(df, level, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
 
-    # estructura ponderada (promedio ponderado)
     for _, col in STRUCT_COLS.items():
         tmp = aggregate_level(df, level, col)[level + ["y_pond"]].rename(columns={"y_pond": f"{col}_pond"})
         agg = agg.merge(tmp, on=level, how="left")
@@ -273,139 +255,25 @@ def corr_heatmap(df: pd.DataFrame) -> go.Figure:
     )
     return fig
 
-def model_importance(df: pd.DataFrame, target="KG/HA") -> pd.DataFrame:
-    """
-    Modelo orientativo (NO causal):
-    - RandomForestRegressor
-    - Preprocess: imputación + onehot categóricas
-    - Importancia: permutation_importance en test
-    - Agrega importancia por variable base (antes de onehot)
-
-    FIX del error:
-    - usamos get_feature_names_out() del ColumnTransformer
-    - base_feature se obtiene quitando prefijos num__/cat__ y cortando antes del primer "_"
-    """
-    if df.empty or target not in df.columns:
-        return pd.DataFrame(columns=["base_feature", "importance_mean"])
-
-    d = df.copy()
-    d[target] = to_numeric_safe(d[target])
-    d = d.dropna(subset=[target])
-    if d.empty:
-        return pd.DataFrame(columns=["base_feature", "importance_mean"])
-
-    feature_cols = [
-        "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
-        "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
-        "Ha COSECHADA", "Ha TURNO", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
-        "PESO BAYA (g)", "CALIBRE BAYA (mm)", "SEMANA DE SIEMBRA",
-        "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-        "EDAD PLANTA", "EDAD PLANTA FINAL", "SIEMBRA"
-    ]
-    feature_cols = [c for c in feature_cols if c in d.columns]
-
-    X = d[feature_cols].copy()
-    y = d[target].copy()
-
-    cat_cols = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
-    num_cols = [c for c in X.columns if c not in cat_cols]
-
-    for c in num_cols:
-        X[c] = to_numeric_safe(X[c])
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("num", Pipeline(steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-            ]), num_cols),
-            ("cat", Pipeline(steps=[
-                ("imputer", SimpleImputer(strategy="most_frequent")),
-                ("oh", OneHotEncoder(handle_unknown="ignore")),
-            ]), cat_cols),
-        ],
-        remainder="drop",
-        verbose_feature_names_out=True
-    )
-
-    model = RandomForestRegressor(
-        n_estimators=250,
-        random_state=42,
-        n_jobs=-1,
-        max_depth=None
-    )
-
-    pipe = Pipeline(steps=[("pre", pre), ("model", model)])
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
-    pipe.fit(X_train, y_train)
-
-    feat_names = pipe.named_steps["pre"].get_feature_names_out()
-
-    r = permutation_importance(
-        pipe, X_test, y_test,
-        n_repeats=10,
-        random_state=42,
-        n_jobs=-1
-    )
-
-    imp = pd.DataFrame({
-        "feature": feat_names,
-        "importance_mean": r.importances_mean
-    })
-
-    def base_from_feature(s: str) -> str:
-        s = str(s)
-        s = s.replace("num__", "").replace("cat__", "")
-        # para onehot: "VARIEDAD_SEKOYA POP" -> base "VARIEDAD"
-        return s.split("_")[0].strip()
-
-    imp["base_feature"] = imp["feature"].apply(base_from_feature)
-
-    agg = (
-        imp.groupby("base_feature", dropna=False)["importance_mean"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-
-    agg["importance_mean"] = agg["importance_mean"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return agg
-
 def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
-    """
-    Determina la semana de inicio global del eje X (campaña) usando AÑO+CAMPAÑA+SEMANA.
-
-    Lógica:
-    - Para cada campaña c, intentamos encontrar su semana de inicio como:
-        min(SEMANA) donde CAMPAÑA==c y AÑO==c  (inicio en el año “propio” de campaña)
-      Si no hay filas así, fallback: min(SEMANA) dentro de CAMPAÑA==c.
-    - Luego tomamos el mínimo entre campañas (start_global).
-    """
     if dff.empty:
         return 1
 
     d = dff.copy()
-
-    # AÑO numérico
     d["AÑO_NUM"] = to_numeric_safe(d["AÑO"])
-    # CAMPAÑA numérica si se puede
     d["CAMPAÑA_NUM"] = pd.to_numeric(d["CAMPAÑA"].astype(str).str.strip(), errors="coerce")
 
     starts = []
     for camp, g in d.groupby("CAMPAÑA", dropna=False):
-        g2 = g.copy()
         camp_num = pd.to_numeric(str(camp).strip(), errors="coerce")
 
-        # preferido: AÑO == CAMPAÑA
         if pd.notna(camp_num):
-            h = g2[g2["AÑO_NUM"] == camp_num]
-            h = h.dropna(subset=["SEMANA"])
+            h = g[g["AÑO_NUM"] == camp_num].dropna(subset=["SEMANA"])
             if not h.empty:
                 starts.append(int(h["SEMANA"].min()))
                 continue
 
-        # fallback
-        g2 = g2.dropna(subset=["SEMANA"])
+        g2 = g.dropna(subset=["SEMANA"])
         if not g2.empty:
             starts.append(int(g2["SEMANA"].min()))
 
@@ -413,28 +281,29 @@ def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
         return int(d["SEMANA"].min()) if d["SEMANA"].notna().any() else 1
 
     start_global = int(min(starts))
-    # por seguridad (semana válida 1..52)
     start_global = max(1, min(52, start_global))
     return start_global
 
 # --------------------------
-# UI: HEADER + UPLOADER
+# UI: HEADER
 # --------------------------
 st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
 
-with st.sidebar:
-    st.header("📦 Cargar Excel")
-    up = st.file_uploader("Sube el Excel consolidado (.xlsx)", type=["xlsx"])
-    st.caption(f"Requisito: la hoja debe llamarse exactamente **{REQ_SHEET}**.")
-
-if up is None:
-    st.info("📌 Sube tu archivo Excel para empezar.")
+# --------------------------
+# LOAD (AUTO DESDE REPO)
+# --------------------------
+if not os.path.exists(DATA_FILE):
+    st.error(
+        f"No encuentro el archivo **{DATA_FILE}** en la carpeta del app.\n\n"
+        "✅ Solución:\n"
+        "- Asegúrate que el Excel esté en el repo en la **misma carpeta** que `app.py`.\n"
+        "- Que el nombre sea EXACTO (mayúsculas/espacios): "
+        f"`{DATA_FILE}`\n"
+        f"- Y que la hoja se llame exactamente: `{REQ_SHEET}`"
+    )
     st.stop()
 
-# --------------------------
-# LOAD
-# --------------------------
-df_raw = read_excel(up.getvalue(), REQ_SHEET)
+df_raw = read_excel_path(DATA_FILE, REQ_SHEET)
 
 missing = validate_cols(df_raw)
 if missing:
@@ -446,8 +315,6 @@ df = df_raw.copy()
 
 # Tipos básicos
 df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
-
-# CAMPAÑA como string (evita 2022.5 en ejes)
 df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
 
 # Numéricas clave
@@ -486,7 +353,7 @@ with st.sidebar:
     campo_f = ms("CAMPO")
     turno_f = ms("TURNO")
     variedad_f = ms("VARIEDAD")
-    edad_final_f = ms("EDAD PLANTA FINAL")  # ✅ filtro solicitado
+    edad_final_f = ms("EDAD PLANTA FINAL")
 
     sem_min, sem_max = int(df["SEMANA"].min()), int(df["SEMANA"].max())
     smin, smax = st.slider("SEMANA (rango)", sem_min, sem_max, (sem_min, sem_max))
@@ -535,7 +402,7 @@ if not dff.empty:
         .reset_index()
     )
     tmp["%_CUAJADO"] = np.where(tmp["FLORES"] > 0, (tmp["CUAJ"] / tmp["FLORES"]), np.nan) * 100
-    tmp["%_CUAJADO"] = tmp["%_CUAJADO"].clip(lower=0, upper=100)  # ✅ cap 100%
+    tmp["%_CUAJADO"] = tmp["%_CUAJADO"].clip(lower=0, upper=100)
 
     fig_cuaj = px.bar(
         tmp, x="CAMPAÑA", y="%_CUAJADO",
@@ -557,7 +424,6 @@ with left:
     y_label = st.selectbox("Métrica Y (ponderada por Ha COSECHADA)", list(METRIC_Y_OPTIONS.keys()), index=0)
     y_col = METRIC_Y_OPTIONS[y_label]
 
-    # variables X: resto de numéricas (excluye Y y peso)
     numeric_candidates = []
     for c in dff.columns:
         if c in [y_col, W_COL]:
@@ -574,7 +440,6 @@ with left:
     x_col = st.selectbox("Variable X", ordered, index=0 if ordered else 0)
 
 with right:
-    # Agrega al nivel TURNO
     level = ["TURNO"]
     agg_sc = aggregate_level(dff, level, y_col).rename(columns={"y_pond": "Y_pond"})
 
@@ -582,7 +447,6 @@ with right:
         tmpx = aggregate_level(dff, level, x_col)[["TURNO", "y_pond"]].rename(columns={"y_pond": "X_pond"})
         agg_sc = agg_sc.merge(tmpx, on="TURNO", how="left")
 
-    # best/worst (por Y_pond)
     agg_sc["POINT"] = "NORMAL"
     if not agg_sc.empty and agg_sc["Y_pond"].notna().any():
         idx_best = agg_sc["Y_pond"].idxmax()
@@ -612,7 +476,6 @@ st.subheader("Curva semanal de KG/HA (comparación por campaña)")
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    # promedio ponderado por campaña-semana (semana real 1..52)
     rows = []
     for (camp, sem), g in dff.groupby(["CAMPAÑA", "SEMANA"], dropna=False):
         rows.append({
@@ -622,21 +485,14 @@ else:
         })
     wk = pd.DataFrame(rows)
 
-    # ✅ EJE X continuo:
-    # - calculamos semana de inicio global según AÑO+CAMPAÑA
     start_week = compute_campaign_axis_start_week(dff)
-
-    # SEMANA_EJE: semanas < start_week van al “siguiente año” (sumamos 52)
     wk["SEMANA_EJE"] = np.where(wk["SEMANA"] < start_week, wk["SEMANA"] + 52, wk["SEMANA"]).astype(int)
-
     wk = wk.sort_values(["CAMPAÑA", "SEMANA_EJE"])
 
-    # ticks: start_week..52 luego 53..(52+end_week)
     max_eje = int(wk["SEMANA_EJE"].max())
-    tickvals = list(range(start_week, 53))  # start..52
+    tickvals = list(range(start_week, 53))
     if max_eje >= 53:
-        tickvals += list(range(53, max_eje + 1))  # 53..max
-
+        tickvals += list(range(53, max_eje + 1))
     ticktext = [str(v) if v <= 52 else str(v - 52) for v in tickvals]
 
     fig_wk = px.line(
@@ -665,7 +521,6 @@ st.subheader("KG/HA ponderado: Boxplot por SIEMBRA y por EDAD PLANTA FINAL")
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    # unidad estable: TURNO (incluye edad final)
     turn_level = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "SIEMBRA", "EDAD PLANTA FINAL"]
     agg_turn = aggregate_level(dff, turn_level, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
     agg_turn = agg_turn.dropna(subset=["KG/HA_pond"])
@@ -816,7 +671,6 @@ else:
         ]
         kgvals = [row["KG/HA_MAX (pond)"], row["KG/HA_MIN (pond)"]]
 
-        # estructura promedio ponderada para MAX/MIN
         tl = turno_level.copy()
         tl["CAMPAÑA"] = tl["CAMPAÑA"].astype(str)
 
@@ -874,31 +728,4 @@ st.subheader("Mapa de correlaciones (solo columnas seleccionadas)")
 fig_corr = corr_heatmap(dff)
 st.plotly_chart(fig_corr, use_container_width=True)
 
-st.divider()
-
-# --------------------------
-# MODELO: IMPORTANCIA
-# --------------------------
-st.subheader("Variables más asociadas a KG/HA (modelo)")
-
-top_k = st.slider("Top K variables (importancia)", 10, 40, 20)
-
-try:
-    imp_df = model_importance(dff, target="KG/HA")
-except Exception as e:
-    st.error("Error en model_importance()")
-    st.exception(e)
-    st.stop()
-
-if imp_df.empty:
-    st.info("No se pudo entrenar el modelo con los datos actuales (revisa filtros / cantidad).")
-else:
-    show = imp_df.head(top_k).copy()
-    fig_imp = px.bar(
-        show.sort_values("importance_mean", ascending=True),
-        x="importance_mean", y="base_feature",
-        orientation="h",
-        title="Importancia global (agregada por variable original)"
-    )
-    st.plotly_chart(fig_imp, use_container_width=True)
-    st.caption("Nota: esto es orientativo (asociación), no implica causalidad.")
+# ✅ FIN (se eliminó la sección del modelo/importancias)
