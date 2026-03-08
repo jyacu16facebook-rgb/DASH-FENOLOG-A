@@ -14,14 +14,13 @@
 # - Best/Worst TURNO dentro de (CAMPAÑA + VARIEDAD) con ETAPA/CAMPO + estructura (promedios ponderados)
 # - Correlaciones: solo columnas solicitadas
 # - Vista adicional: FLORES vs FRUTO CUAJADO (% cuajado, cap a 100%)
-# - Vista adicional: KG/PLANTA con nueva fórmula:
+# - Vista adicional: KG/PLANTA con fórmula:
 #       KG/PLANTA = kilogramos / (Ha TURNO * DENSIDAD)
 #   respetando el TURNO como unidad única para evitar duplicar área por semana
-# - Nuevas vistas agregadas:
-#   (1) Eficiencia reproductiva vs rendimiento
-#   (2) Estructura vs rendimiento
-#   (3) KG/HA por edad y campaña
-#   (4) Densidad vs rendimiento
+# - Vistas agregadas:
+#   (1) Estructura vs rendimiento
+#   (2) KG/HA por edad y campaña
+#   (3) Densidad vs rendimiento
 # ==========================================================
 
 import os
@@ -293,15 +292,9 @@ def first_valid(series: pd.Series):
     return s.iloc[0] if not s.empty else np.nan
 
 def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Nueva lógica:
-    KG/PLANTA = kg_total / SUMA( Ha TURNO * DENSIDAD ) por unidades únicas de TURNO.
-    Para no duplicar el área por semana, el denominador se arma sobre turnos únicos.
-    """
     if df.empty:
         return pd.DataFrame(columns=["CAMPAÑA", "KG/PLANTA_calc"])
 
-    # unidad única para evitar duplicar Ha TURNO y DENSIDAD por semana
     unit_cols = ["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
 
     rows = []
@@ -338,7 +331,7 @@ def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------
 # UI: HEADER
 # --------------------------
-st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2026")
+st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
 
 # --------------------------
 # LOAD
@@ -363,7 +356,6 @@ if missing:
 
 df = df_raw.copy()
 
-# Tipos básicos
 df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
 df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
 
@@ -423,42 +415,6 @@ st.dataframe(
     }),
     use_container_width=True
 )
-
-# --------------------------
-# FLORES vs CUAJADO (cap 100%)
-# --------------------------
-st.subheader("Flores vs Cuajado (conversión)")
-
-c1, c2, c3, c4 = st.columns(4)
-flores_sum = float(pd.to_numeric(dff["FLORES"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
-cuaj_sum = float(pd.to_numeric(dff["FRUTO CUAJADO"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
-
-ratio = (cuaj_sum / flores_sum) if flores_sum > 0 else np.nan
-ratio_cap = min(max(ratio, 0), 1) if pd.notna(ratio) else np.nan
-no_cuaj = 1 - ratio_cap if pd.notna(ratio_cap) else np.nan
-
-c1.metric("FLORES (suma)", f"{flores_sum:,.0f}")
-c2.metric("FRUTO CUAJADO (suma)", f"{cuaj_sum:,.0f}")
-c3.metric("% Cuajado (cap 100%)", f"{ratio_cap*100:,.2f}%" if pd.notna(ratio_cap) else "NA")
-c4.metric("% No cuajó", f"{no_cuaj*100:,.2f}%" if pd.notna(no_cuaj) else "NA")
-
-if not dff.empty:
-    tmp = (
-        dff.groupby("CAMPAÑA", dropna=False)
-        .agg(FLORES=("FLORES", "sum"), CUAJ=("FRUTO CUAJADO", "sum"))
-        .reset_index()
-    )
-    tmp["%_CUAJADO"] = np.where(tmp["FLORES"] > 0, (tmp["CUAJ"] / tmp["FLORES"]), np.nan) * 100
-    tmp["%_CUAJADO"] = tmp["%_CUAJADO"].clip(lower=0, upper=100)
-
-    fig_cuaj = px.bar(
-        tmp, x="CAMPAÑA", y="%_CUAJADO",
-        title="% Cuajado por campaña (sum Cuaj / sum Flores, cap 100%)"
-    )
-    fig_cuaj.update_layout(xaxis=dict(type="category"), yaxis=dict(range=[0, 100]))
-    st.plotly_chart(fig_cuaj, use_container_width=True)
-
-st.divider()
 
 # --------------------------
 # SCATTER: X vs MÉTRICA Y (ponderada) + BEST/WORST
@@ -607,7 +563,7 @@ else:
 st.divider()
 
 # --------------------------
-# KG/PLANTA con nueva fórmula
+# KG/PLANTA con fórmula
 # --------------------------
 st.subheader("KG/PLANTA calculado vs campañas")
 
@@ -653,8 +609,6 @@ else:
     for var, g in dff.groupby("VARIEDAD", dropna=False):
         rows.append({"VARIEDAD": var, "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL])})
     avg_var = pd.DataFrame(rows).merge(freq, on="VARIEDAD", how="left").fillna({"n": 0})
-
-    # ranking responde a filtros actuales
     avg_var = avg_var.sort_values("n", ascending=False).head(top_n)
 
     fig_rank = px.bar(
@@ -779,58 +733,7 @@ else:
 st.divider()
 
 # --------------------------
-# NUEVA VISTA 1: EFICIENCIA REPRODUCTIVA vs RENDIMIENTO
-# --------------------------
-st.subheader("Eficiencia reproductiva vs rendimiento")
-
-if dff.empty:
-    st.warning("No hay datos con los filtros actuales.")
-else:
-    rows = []
-    for camp, g in dff.groupby("CAMPAÑA", dropna=False):
-        flores = float(pd.to_numeric(g["FLORES"], errors="coerce").sum(skipna=True))
-        fruto_maduro = float(pd.to_numeric(g["FRUTO MADURO"], errors="coerce").sum(skipna=True))
-        ratio_fm_f = (fruto_maduro / flores) if flores > 0 else np.nan
-
-        rows.append({
-            "CAMPAÑA": str(camp),
-            "FLORES_sum": flores,
-            "FRUTO_MADURO_sum": fruto_maduro,
-            "% FRUTO MADURO / FLORES": ratio_fm_f * 100 if pd.notna(ratio_fm_f) else np.nan,
-            "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL]),
-        })
-
-    eff_df = pd.DataFrame(rows)
-    eff_df["CAMPAÑA"] = pd.Categorical(eff_df["CAMPAÑA"], categories=_sort_campaign_categories(eff_df["CAMPAÑA"]), ordered=True)
-    eff_df = eff_df.sort_values("CAMPAÑA")
-
-    fig_eff = go.Figure()
-    fig_eff.add_trace(go.Bar(
-        x=eff_df["CAMPAÑA"].astype(str),
-        y=eff_df["% FRUTO MADURO / FLORES"],
-        name="% FRUTO MADURO / FLORES",
-        yaxis="y1"
-    ))
-    fig_eff.add_trace(go.Scatter(
-        x=eff_df["CAMPAÑA"].astype(str),
-        y=eff_df["KG/HA_pond"],
-        mode="lines+markers",
-        name="KG/HA ponderado",
-        yaxis="y2"
-    ))
-    fig_eff.update_layout(
-        title="Eficiencia reproductiva vs rendimiento por campaña",
-        xaxis=dict(type="category"),
-        yaxis=dict(title="% FRUTO MADURO / FLORES"),
-        yaxis2=dict(title="KG/HA_pond", overlaying="y", side="right"),
-        height=450
-    )
-    st.plotly_chart(fig_eff, use_container_width=True)
-
-st.divider()
-
-# --------------------------
-# NUEVA VISTA 2: ESTRUCTURA vs RENDIMIENTO
+# NUEVA VISTA 1: ESTRUCTURA vs RENDIMIENTO
 # --------------------------
 st.subheader("Estructura vs rendimiento")
 
@@ -871,7 +774,8 @@ else:
 st.divider()
 
 # --------------------------
-# NUEVA VISTA 3: KG/HA por EDAD y CAMPAÑA
+# NUEVA VISTA 2: KG/HA por EDAD y CAMPAÑA
+# AJUSTADA para mejor interpretación y orden correcto del eje X
 # --------------------------
 st.subheader("KG/HA ponderado por edad y campaña")
 
@@ -887,27 +791,31 @@ else:
         })
 
     age_camp = pd.DataFrame(rows)
+    campaign_order = _sort_campaign_categories(age_camp["CAMPAÑA"])
     order_age = ["1", "2", "3+"]
-    age_camp["CAMPAÑA"] = pd.Categorical(age_camp["CAMPAÑA"], categories=_sort_campaign_categories(age_camp["CAMPAÑA"]), ordered=True)
+    age_camp["CAMPAÑA"] = pd.Categorical(age_camp["CAMPAÑA"], categories=campaign_order, ordered=True)
     age_camp["EDAD PLANTA FINAL"] = pd.Categorical(age_camp["EDAD PLANTA FINAL"], categories=order_age, ordered=True)
     age_camp = age_camp.sort_values(["CAMPAÑA", "EDAD PLANTA FINAL"])
 
-    fig_agecamp = px.line(
+    fig_agecamp = px.bar(
         age_camp,
         x="CAMPAÑA",
         y="KG/HA_pond",
         color="EDAD PLANTA FINAL",
-        markers=True,
-        category_orders={"EDAD PLANTA FINAL": order_age},
+        barmode="group",
+        category_orders={"CAMPAÑA": campaign_order, "EDAD PLANTA FINAL": order_age},
         title="KG/HA ponderado por EDAD PLANTA FINAL y CAMPAÑA"
     )
-    fig_agecamp.update_layout(xaxis=dict(type="category"))
+    fig_agecamp.update_layout(
+        xaxis=dict(type="category", categoryorder="array", categoryarray=campaign_order),
+        yaxis=dict(title="KG/HA_pond")
+    )
     st.plotly_chart(fig_agecamp, use_container_width=True)
 
 st.divider()
 
 # --------------------------
-# NUEVA VISTA 4: DENSIDAD vs RENDIMIENTO
+# NUEVA VISTA 3: DENSIDAD vs RENDIMIENTO
 # --------------------------
 st.subheader("Densidad vs rendimiento")
 
@@ -932,6 +840,50 @@ else:
         yaxis_title="KG/HA_pond"
     )
     st.plotly_chart(fig_den, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# FLORES vs CUAJADO (cap 100%)
+# MOVIDA antes del mapa de correlaciones
+# --------------------------
+st.subheader("Flores vs Cuajado (conversión)")
+
+c1, c2, c3, c4 = st.columns(4)
+flores_sum = float(pd.to_numeric(dff["FLORES"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
+cuaj_sum = float(pd.to_numeric(dff["FRUTO CUAJADO"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
+
+ratio = (cuaj_sum / flores_sum) if flores_sum > 0 else np.nan
+ratio_cap = min(max(ratio, 0), 1) if pd.notna(ratio) else np.nan
+no_cuaj = 1 - ratio_cap if pd.notna(ratio_cap) else np.nan
+
+c1.metric("FLORES (suma)", f"{flores_sum:,.0f}")
+c2.metric("FRUTO CUAJADO (suma)", f"{cuaj_sum:,.0f}")
+c3.metric("% Cuajado (cap 100%)", f"{ratio_cap*100:,.2f}%" if pd.notna(ratio_cap) else "NA")
+c4.metric("% No cuajó", f"{no_cuaj*100:,.2f}%" if pd.notna(no_cuaj) else "NA")
+
+if not dff.empty:
+    tmp = (
+        dff.groupby("CAMPAÑA", dropna=False)
+        .agg(FLORES=("FLORES", "sum"), CUAJ=("FRUTO CUAJADO", "sum"))
+        .reset_index()
+    )
+    campaign_order = _sort_campaign_categories(tmp["CAMPAÑA"])
+    tmp["CAMPAÑA"] = pd.Categorical(tmp["CAMPAÑA"].astype(str), categories=campaign_order, ordered=True)
+    tmp["%_CUAJADO"] = np.where(tmp["FLORES"] > 0, (tmp["CUAJ"] / tmp["FLORES"]), np.nan) * 100
+    tmp["%_CUAJADO"] = tmp["%_CUAJADO"].clip(lower=0, upper=100)
+    tmp = tmp.sort_values("CAMPAÑA")
+
+    fig_cuaj = px.bar(
+        tmp, x="CAMPAÑA", y="%_CUAJADO",
+        category_orders={"CAMPAÑA": campaign_order},
+        title="% Cuajado por campaña (sum Cuaj / sum Flores, cap 100%)"
+    )
+    fig_cuaj.update_layout(
+        xaxis=dict(type="category", categoryorder="array", categoryarray=campaign_order),
+        yaxis=dict(range=[0, 100])
+    )
+    st.plotly_chart(fig_cuaj, use_container_width=True)
 
 st.divider()
 
