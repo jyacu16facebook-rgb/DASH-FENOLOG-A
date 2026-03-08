@@ -14,15 +14,17 @@
 # - Best/Worst TURNO dentro de (CAMPAÑA + VARIEDAD) con ETAPA/CAMPO + estructura (promedios ponderados)
 # - Correlaciones: solo columnas solicitadas
 # - Vista adicional: FLORES vs FRUTO CUAJADO (% cuajado, cap a 100%)
-# - Vista adicional: KG/PLANTA ponderado vs campañas (si no existe, se calcula con KG/HA y DENSIDAD)
-#
-# ✅ CAMBIOS PEDIDOS:
-#   (1) Se elimina la sección "Variables más asociadas a KG/HA (modelo)"
-#   (2) Se elimina uploader; se carga directo desde el Excel que está en el repo
+# - Vista adicional: KG/PLANTA con nueva fórmula:
+#       KG/PLANTA = kilogramos / (Ha TURNO * DENSIDAD)
+#   respetando el TURNO como unidad única para evitar duplicar área por semana
+# - Nuevas vistas agregadas:
+#   (1) Eficiencia reproductiva vs rendimiento
+#   (2) Estructura vs rendimiento
+#   (3) KG/HA por edad y campaña
+#   (4) Densidad vs rendimiento
 # ==========================================================
 
 import os
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -36,36 +38,39 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Fenología vs rendimiento", layout="wide")
 
 REQ_SHEET = "DATA"
-
-# ✅ Archivo Excel que está en tu repo (misma carpeta que app.py)
 DATA_FILE = "CONSOLIDADO 2022-2026.xlsx"
 
 COLS_REQUIRED = [
     "AÑO", "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
-    "kilogramos", "FLORES", "FRUTO CUAJADO", "Ha COSECHADA", "Ha TURNO",
-    "KG/HA", "DENSIDAD", "FRUTO MADURO", "PESO BAYA (g)", "CALIBRE BAYA (mm)",
-    "SEMANA DE SIEMBRA", "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES",
-    "TERMINALES", "EDAD PLANTA", "EDAD PLANTA FINAL", "SIEMBRA"
+    "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+    "Ha COSECHADA", "Ha TURNO", "KG/HA", "DENSIDAD", "FRUTO MADURO",
+    "FRUTO ROSADO", "FRUTO CREMOSO",
+    "PESO BAYA (g)", "PESO BAYA CREMOSO (g)",
+    "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
+    "SEMANA DE SIEMBRA", "FECHA FIN DE SIEMBRA", "TIPO PODA", "FECHA PODA",
+    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+    "EDAD PLANTA", "EDAD PLANTA FINAL",
+    "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+    "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+    "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT",
+    "SIEMBRA"
 ]
 
-# Ponderación
 W_COL = "Ha COSECHADA"
 
-# Opciones Y (ponderadas)
 METRIC_Y_OPTIONS = {
     "KG/HA": "KG/HA",
     "PESO BAYA (g)": "PESO BAYA (g)",
     "CALIBRE BAYA (mm)": "CALIBRE BAYA (mm)",
 }
 
-# Estructura (promedios ponderados)
 STRUCT_COLS = {
     "MADERAS PRINCIPALES": "MADERAS PRINCIPALES",
-    "CORTES (antes CARGADORES)": "CORTES",
-    "BROTES TOTALES (antes RAMAS TOTALES)": "BROTES TOTALES",
+    "CORTES": "CORTES",
+    "BROTES TOTALES": "BROTES TOTALES",
 }
 
-# Correlaciones (solo estas)
 CORR_COLS = [
     "KG/HA",
     "kilogramos",
@@ -98,7 +103,6 @@ def weighted_mean(x: pd.Series, w: pd.Series) -> float:
     return float(np.average(x[mask], weights=w[mask]))
 
 def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
-    # EDAD PLANTA FINAL debe ser 1,2,3+ (string ordenado)
     if "EDAD PLANTA FINAL" in df.columns:
         df["EDAD PLANTA FINAL"] = df["EDAD PLANTA FINAL"].astype(str).str.strip()
         df.loc[df["EDAD PLANTA FINAL"].isin(["3", "3.0", "3.00"]), "EDAD PLANTA FINAL"] = "3+"
@@ -284,21 +288,67 @@ def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
     start_global = max(1, min(52, start_global))
     return start_global
 
+def first_valid(series: pd.Series):
+    s = series.dropna()
+    return s.iloc[0] if not s.empty else np.nan
+
+def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Nueva lógica:
+    KG/PLANTA = kg_total / SUMA( Ha TURNO * DENSIDAD ) por unidades únicas de TURNO.
+    Para no duplicar el área por semana, el denominador se arma sobre turnos únicos.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["CAMPAÑA", "KG/PLANTA_calc"])
+
+    # unidad única para evitar duplicar Ha TURNO y DENSIDAD por semana
+    unit_cols = ["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
+
+    rows = []
+    for camp, g in df.groupby("CAMPAÑA", dropna=False):
+        kg_total = float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True))
+
+        base_turno = (
+            g.groupby(unit_cols, dropna=False)
+             .agg(
+                 Ha_TURNO_u=("Ha TURNO", first_valid),
+                 DENSIDAD_u=("DENSIDAD", first_valid)
+             )
+             .reset_index()
+        )
+
+        base_turno["Ha_TURNO_u"] = to_numeric_safe(base_turno["Ha_TURNO_u"])
+        base_turno["DENSIDAD_u"] = to_numeric_safe(base_turno["DENSIDAD_u"])
+        base_turno["den_turno"] = base_turno["Ha_TURNO_u"] * base_turno["DENSIDAD_u"]
+
+        den_total = float(base_turno["den_turno"].sum(skipna=True))
+        kg_planta = (kg_total / den_total) if den_total > 0 else np.nan
+
+        rows.append({
+            "CAMPAÑA": str(camp),
+            "KG_TOTAL": kg_total,
+            "DEN_TOTAL_HA_TURNO_X_DENSIDAD": den_total,
+            "KG/PLANTA_calc": kg_planta
+        })
+
+    out = pd.DataFrame(rows)
+    out["CAMPAÑA"] = pd.Categorical(out["CAMPAÑA"], categories=_sort_campaign_categories(out["CAMPAÑA"]), ordered=True)
+    return out.sort_values("CAMPAÑA").reset_index(drop=True)
+
 # --------------------------
 # UI: HEADER
 # --------------------------
-st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
+st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2026")
 
 # --------------------------
-# LOAD (AUTO DESDE REPO)
+# LOAD
 # --------------------------
 if not os.path.exists(DATA_FILE):
     st.error(
         f"No encuentro el archivo **{DATA_FILE}** en la carpeta del app.\n\n"
         "✅ Solución:\n"
-        "- Asegúrate que el Excel esté en el repo en la **misma carpeta** que `app.py`.\n"
-        "- Que el nombre sea EXACTO (mayúsculas/espacios): "
-        f"`{DATA_FILE}`\n"
+        "- Asegúrate que el Excel esté en el repo en la misma carpeta que `app.py`.\n"
+        f"- Que el nombre sea EXACTO: `{DATA_FILE}`\n"
         f"- Y que la hoja se llame exactamente: `{REQ_SHEET}`"
     )
     st.stop()
@@ -317,25 +367,22 @@ df = df_raw.copy()
 df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
 df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
 
-# Numéricas clave
 num_main = [
-    "AÑO",
-    "kilogramos", "KG/HA", "Ha COSECHADA", "Ha TURNO",
-    "PESO BAYA (g)", "CALIBRE BAYA (mm)",
-    "FLORES", "FRUTO CUAJADO", "DENSIDAD", "FRUTO MADURO",
+    "AÑO", "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+    "Ha COSECHADA", "Ha TURNO", "KG/HA", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
+    "PESO BAYA (g)", "PESO BAYA CREMOSO (g)", "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
     "SEMANA DE SIEMBRA",
-    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-    "EDAD PLANTA",
+    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA",
+    "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+    "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+    "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
 ]
 for c in num_main:
     if c in df.columns:
         df[c] = to_numeric_safe(df[c])
 
 df = ensure_categories_age(df)
-
-# Si no existe KG/PLANTA, lo calculamos (kg/ha / densidad)
-if "KG/PLANTA" not in df.columns and ("KG/HA" in df.columns) and ("DENSIDAD" in df.columns):
-    df["KG/PLANTA"] = np.where(df["DENSIDAD"] > 0, df["KG/HA"] / df["DENSIDAD"], np.nan)
 
 # --------------------------
 # FILTERS
@@ -433,7 +480,12 @@ with left:
 
     preferred = [
         "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS", "DENSIDAD", "FRUTO MADURO",
-        "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA", "SEMANA DE SIEMBRA"
+        "FRUTO ROSADO", "FRUTO CREMOSO",
+        "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA", "SEMANA DE SIEMBRA",
+        "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+        "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+        "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+        "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
     ]
     ordered = [c for c in preferred if c in numeric_candidates] + [c for c in sorted(numeric_candidates) if c not in preferred]
 
@@ -469,7 +521,7 @@ with right:
 st.divider()
 
 # --------------------------
-# CURVA SEMANAL: KG/HA ponderado por Ha COSECHADA (EJE X continuo por campaña)
+# CURVA SEMANAL: KG/HA ponderado por Ha COSECHADA
 # --------------------------
 st.subheader("Curva semanal de KG/HA (comparación por campaña)")
 
@@ -514,7 +566,7 @@ else:
 st.divider()
 
 # --------------------------
-# BOXPLOTS: SIEMBRA y EDAD PLANTA FINAL (ponderado)
+# BOXPLOTS: SIEMBRA y EDAD PLANTA FINAL
 # --------------------------
 st.subheader("KG/HA ponderado: Boxplot por SIEMBRA y por EDAD PLANTA FINAL")
 
@@ -555,25 +607,28 @@ else:
 st.divider()
 
 # --------------------------
-# KG/PLANTA ponderado vs CAMPAÑA
+# KG/PLANTA con nueva fórmula
 # --------------------------
-if "KG/PLANTA" in dff.columns:
-    st.subheader("KG/PLANTA ponderado (Ha COSECHADA) vs campañas")
-    tmp = []
-    for camp, g in dff.groupby("CAMPAÑA", dropna=False):
-        tmp.append({"CAMPAÑA": str(camp), "KG/PLANTA_pond": weighted_mean(g["KG/PLANTA"], g[W_COL])})
-    tmp = pd.DataFrame(tmp)
-    tmp["CAMPAÑA"] = pd.Categorical(tmp["CAMPAÑA"], categories=_sort_campaign_categories(tmp["CAMPAÑA"]), ordered=True)
-    tmp = tmp.sort_values("CAMPAÑA")
+st.subheader("KG/PLANTA calculado vs campañas")
 
-    fig_kp = px.line(tmp, x="CAMPAÑA", y="KG/PLANTA_pond", markers=True, title="KG/PLANTA ponderado vs CAMPAÑA")
-    fig_kp.update_layout(xaxis=dict(type="category"))
+kgp = compute_kg_planta_campaign(dff)
+if kgp.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    fig_kp = px.line(
+        kgp,
+        x="CAMPAÑA",
+        y="KG/PLANTA_calc",
+        markers=True,
+        title="KG/PLANTA calculado vs CAMPAÑA | Fórmula: KG total / SUMA(Ha TURNO × DENSIDAD por turno único)"
+    )
+    fig_kp.update_layout(xaxis=dict(type="category"), yaxis=dict(title="KG/PLANTA_calc"))
     st.plotly_chart(fig_kp, use_container_width=True)
 
 st.divider()
 
 # --------------------------
-# VARIEDADES: ranking ponderado + VS por campañas (heatmap)
+# VARIEDADES: ranking ponderado + heatmap VS campañas
 # --------------------------
 st.subheader("Variedades: ranking (KG/HA ponderado) + VS por campañas")
 
@@ -598,6 +653,8 @@ else:
     for var, g in dff.groupby("VARIEDAD", dropna=False):
         rows.append({"VARIEDAD": var, "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL])})
     avg_var = pd.DataFrame(rows).merge(freq, on="VARIEDAD", how="left").fillna({"n": 0})
+
+    # ranking responde a filtros actuales
     avg_var = avg_var.sort_values("n", ascending=False).head(top_n)
 
     fig_rank = px.bar(
@@ -632,7 +689,7 @@ else:
 st.divider()
 
 # --------------------------
-# BEST vs WORST TURNO dentro de (CAMPAÑA + VARIEDAD) + gráfico estilo Excel
+# BEST vs WORST TURNO dentro de (CAMPAÑA + VARIEDAD)
 # --------------------------
 st.subheader("Best vs Worst TURNO dentro de (CAMPAÑA + VARIEDAD)")
 
@@ -722,10 +779,165 @@ else:
 st.divider()
 
 # --------------------------
+# NUEVA VISTA 1: EFICIENCIA REPRODUCTIVA vs RENDIMIENTO
+# --------------------------
+st.subheader("Eficiencia reproductiva vs rendimiento")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    rows = []
+    for camp, g in dff.groupby("CAMPAÑA", dropna=False):
+        flores = float(pd.to_numeric(g["FLORES"], errors="coerce").sum(skipna=True))
+        fruto_maduro = float(pd.to_numeric(g["FRUTO MADURO"], errors="coerce").sum(skipna=True))
+        ratio_fm_f = (fruto_maduro / flores) if flores > 0 else np.nan
+
+        rows.append({
+            "CAMPAÑA": str(camp),
+            "FLORES_sum": flores,
+            "FRUTO_MADURO_sum": fruto_maduro,
+            "% FRUTO MADURO / FLORES": ratio_fm_f * 100 if pd.notna(ratio_fm_f) else np.nan,
+            "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL]),
+        })
+
+    eff_df = pd.DataFrame(rows)
+    eff_df["CAMPAÑA"] = pd.Categorical(eff_df["CAMPAÑA"], categories=_sort_campaign_categories(eff_df["CAMPAÑA"]), ordered=True)
+    eff_df = eff_df.sort_values("CAMPAÑA")
+
+    fig_eff = go.Figure()
+    fig_eff.add_trace(go.Bar(
+        x=eff_df["CAMPAÑA"].astype(str),
+        y=eff_df["% FRUTO MADURO / FLORES"],
+        name="% FRUTO MADURO / FLORES",
+        yaxis="y1"
+    ))
+    fig_eff.add_trace(go.Scatter(
+        x=eff_df["CAMPAÑA"].astype(str),
+        y=eff_df["KG/HA_pond"],
+        mode="lines+markers",
+        name="KG/HA ponderado",
+        yaxis="y2"
+    ))
+    fig_eff.update_layout(
+        title="Eficiencia reproductiva vs rendimiento por campaña",
+        xaxis=dict(type="category"),
+        yaxis=dict(title="% FRUTO MADURO / FLORES"),
+        yaxis2=dict(title="KG/HA_pond", overlaying="y", side="right"),
+        height=450
+    )
+    st.plotly_chart(fig_eff, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# NUEVA VISTA 2: ESTRUCTURA vs RENDIMIENTO
+# --------------------------
+st.subheader("Estructura vs rendimiento")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    struct_x_options = [
+        c for c in [
+            "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+            "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+            "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+            "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+            "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
+        ] if c in dff.columns
+    ]
+
+    struct_pick = st.selectbox("Variable de estructura (X)", struct_x_options, index=0 if struct_x_options else 0)
+
+    level_struct = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
+    agg_y = aggregate_level(dff, level_struct, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
+    agg_x = aggregate_level(dff, level_struct, struct_pick)[level_struct + ["y_pond"]].rename(columns={"y_pond": "X_pond"})
+    struct_df = agg_y.merge(agg_x, on=level_struct, how="left")
+
+    fig_struct = px.scatter(
+        struct_df,
+        x="X_pond",
+        y="KG/HA_pond",
+        color="CAMPAÑA",
+        hover_data=["ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum"],
+        title=f"{struct_pick} vs KG/HA ponderado"
+    )
+    fig_struct.update_layout(
+        xaxis_title=struct_pick,
+        yaxis_title="KG/HA_pond"
+    )
+    st.plotly_chart(fig_struct, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# NUEVA VISTA 3: KG/HA por EDAD y CAMPAÑA
+# --------------------------
+st.subheader("KG/HA ponderado por edad y campaña")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    rows = []
+    for (camp, edad), g in dff.groupby(["CAMPAÑA", "EDAD PLANTA FINAL"], dropna=False):
+        rows.append({
+            "CAMPAÑA": str(camp),
+            "EDAD PLANTA FINAL": str(edad),
+            "KG/HA_pond": weighted_mean(g["KG/HA"], g[W_COL])
+        })
+
+    age_camp = pd.DataFrame(rows)
+    order_age = ["1", "2", "3+"]
+    age_camp["CAMPAÑA"] = pd.Categorical(age_camp["CAMPAÑA"], categories=_sort_campaign_categories(age_camp["CAMPAÑA"]), ordered=True)
+    age_camp["EDAD PLANTA FINAL"] = pd.Categorical(age_camp["EDAD PLANTA FINAL"], categories=order_age, ordered=True)
+    age_camp = age_camp.sort_values(["CAMPAÑA", "EDAD PLANTA FINAL"])
+
+    fig_agecamp = px.line(
+        age_camp,
+        x="CAMPAÑA",
+        y="KG/HA_pond",
+        color="EDAD PLANTA FINAL",
+        markers=True,
+        category_orders={"EDAD PLANTA FINAL": order_age},
+        title="KG/HA ponderado por EDAD PLANTA FINAL y CAMPAÑA"
+    )
+    fig_agecamp.update_layout(xaxis=dict(type="category"))
+    st.plotly_chart(fig_agecamp, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# NUEVA VISTA 4: DENSIDAD vs RENDIMIENTO
+# --------------------------
+st.subheader("Densidad vs rendimiento")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    level_den = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
+    agg_y = aggregate_level(dff, level_den, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
+    agg_x = aggregate_level(dff, level_den, "DENSIDAD")[level_den + ["y_pond"]].rename(columns={"y_pond": "DENSIDAD_pond"})
+    den_df = agg_y.merge(agg_x, on=level_den, how="left")
+
+    fig_den = px.scatter(
+        den_df,
+        x="DENSIDAD_pond",
+        y="KG/HA_pond",
+        color="CAMPAÑA",
+        hover_data=["ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum"],
+        title="DENSIDAD vs KG/HA ponderado"
+    )
+    fig_den.update_layout(
+        xaxis_title="DENSIDAD",
+        yaxis_title="KG/HA_pond"
+    )
+    st.plotly_chart(fig_den, use_container_width=True)
+
+st.divider()
+
+# --------------------------
 # CORRELACIONES
 # --------------------------
 st.subheader("Mapa de correlaciones (solo columnas seleccionadas)")
 fig_corr = corr_heatmap(dff)
 st.plotly_chart(fig_corr, use_container_width=True)
-
-# ✅ FIN (se eliminó la sección del modelo/importancias)
