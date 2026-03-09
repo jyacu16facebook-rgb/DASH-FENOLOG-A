@@ -13,14 +13,13 @@
 # - Variedades: ranking ponderado + heatmap VS por campaña
 # - Best/Worst TURNO dentro de (CAMPAÑA + VARIEDAD) con ETAPA/CAMPO + estructura (promedios ponderados)
 # - Correlaciones: solo columnas solicitadas
-# - Vista adicional: FLORES vs FRUTO CUAJADO (% cuajado, cap a 100%)
 # - Vista adicional: KG/PLANTA con fórmula:
 #       KG/PLANTA = kilogramos / (Ha TURNO * DENSIDAD)
 #   respetando el TURNO como unidad única para evitar duplicar área por semana
 # - Vistas agregadas:
-#   (1) Estructura vs rendimiento
-#   (2) KG/HA por edad y campaña
-#   (3) Densidad vs rendimiento
+#   (1) KG/HA por edad y campaña
+#   (2) Densidad vs rendimiento
+#   (3) Índice de vigor vegetativo post-poda
 # ==========================================================
 
 import os
@@ -86,6 +85,23 @@ CORR_COLS = [
     "TERMINALES",
     "EDAD PLANTA",
 ]
+
+# Variables para índice de vigor
+VIGOR_VARS = [
+    "BP_N_BROTES_ULT",
+    "BS_N_BROTES_ULT",
+    "BT_N_BROTES_ULT",
+    "BP_LONG_ULT",
+    "BS_LONG_ULT",
+    "BT_LONG_ULT",
+    "BP_DIAM_ULT",
+    "BS_DIAM_ULT",
+    "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT",
+    "ANCHO_PLANTA_ULT",
+]
+
+UNIT_COLS_VIGOR = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
 
 # --------------------------
 # HELPERS
@@ -326,6 +342,98 @@ def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(rows)
     out["CAMPAÑA"] = pd.Categorical(out["CAMPAÑA"], categories=_sort_campaign_categories(out["CAMPAÑA"]), ordered=True)
+    return out.sort_values("CAMPAÑA").reset_index(drop=True)
+
+# --------------------------
+# HELPERS: INDICE DE VIGOR
+# --------------------------
+def minmax_normalize(series: pd.Series, global_min: float, global_max: float) -> pd.Series:
+    s = to_numeric_safe(series)
+    if pd.isna(global_min) or pd.isna(global_max) or global_max == global_min:
+        return pd.Series(np.nan, index=s.index)
+    return (s - global_min) / (global_max - global_min)
+
+def build_vigor_unit_table(df_full: pd.DataFrame, dff_filtered: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye una tabla única por CAMPAÑA-ETAPA-CAMPO-TURNO-VARIEDAD
+    usando:
+    - variables estructurales: último valor válido (porque es evaluación final de campaña)
+    - KG/HA: promedio ponderado por Ha COSECHADA sobre la unidad filtrada
+    """
+    if dff_filtered.empty:
+        return pd.DataFrame()
+
+    # Base filtrada a nivel unidad productiva
+    agg_dict = {col: (col, first_valid) for col in VIGOR_VARS if col in dff_filtered.columns}
+    agg_dict.update({
+        "EDAD PLANTA FINAL": ("EDAD PLANTA FINAL", first_valid),
+        "TIPO PODA": ("TIPO PODA", first_valid),
+        "KG/HA_pond": ("KG/HA", lambda s: np.nan),   # placeholder
+        "AREA_sum": ("Ha COSECHADA", "sum"),
+    })
+
+    unit = (
+        dff_filtered.groupby(UNIT_COLS_VIGOR, dropna=False)
+        .agg(**agg_dict)
+        .reset_index()
+    )
+
+    # KG/HA ponderado por unidad
+    kg_rows = []
+    for keys, g in dff_filtered.groupby(UNIT_COLS_VIGOR, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        rec = {UNIT_COLS_VIGOR[i]: keys[i] for i in range(len(UNIT_COLS_VIGOR))}
+        rec["KG/HA_pond"] = weighted_mean(g["KG/HA"], g[W_COL])
+        kg_rows.append(rec)
+    kg_df = pd.DataFrame(kg_rows)
+
+    unit = unit.drop(columns=["KG/HA_pond"], errors="ignore").merge(kg_df, on=UNIT_COLS_VIGOR, how="left")
+
+    # Min y max globales usando TODA la base para mantener comparabilidad
+    global_stats = {}
+    for col in VIGOR_VARS:
+        if col in df_full.columns:
+            s = to_numeric_safe(df_full[col]).dropna()
+            global_stats[col] = {
+                "min": float(s.min()) if not s.empty else np.nan,
+                "max": float(s.max()) if not s.empty else np.nan,
+            }
+
+    # Normalizar cada variable
+    norm_cols = []
+    for col in VIGOR_VARS:
+        if col in unit.columns and col in global_stats:
+            ncol = f"{col}_NORM"
+            unit[ncol] = minmax_normalize(unit[col], global_stats[col]["min"], global_stats[col]["max"])
+            norm_cols.append(ncol)
+
+    # Índice básico = promedio simple de variables normalizadas disponibles
+    if norm_cols:
+        unit["N_VARS_VIGOR"] = unit[norm_cols].notna().sum(axis=1)
+        unit["INDICE_VIGOR"] = unit[norm_cols].mean(axis=1, skipna=True)
+        unit.loc[unit["N_VARS_VIGOR"] == 0, "INDICE_VIGOR"] = np.nan
+    else:
+        unit["N_VARS_VIGOR"] = 0
+        unit["INDICE_VIGOR"] = np.nan
+
+    return unit
+
+def vigor_summary_by_campaign(unit_vigor: pd.DataFrame) -> pd.DataFrame:
+    if unit_vigor.empty:
+        return pd.DataFrame(columns=["CAMPAÑA", "INDICE_VIGOR", "KG/HA_pond"])
+
+    rows = []
+    for camp, g in unit_vigor.groupby("CAMPAÑA", dropna=False):
+        rows.append({
+            "CAMPAÑA": str(camp),
+            "INDICE_VIGOR": float(pd.to_numeric(g["INDICE_VIGOR"], errors="coerce").mean(skipna=True)),
+            "KG/HA_pond": float(pd.to_numeric(g["KG/HA_pond"], errors="coerce").mean(skipna=True)),
+            "N_UNIDADES": int(g["INDICE_VIGOR"].notna().sum()),
+        })
+    out = pd.DataFrame(rows)
+    order = _sort_campaign_categories(out["CAMPAÑA"])
+    out["CAMPAÑA"] = pd.Categorical(out["CAMPAÑA"], categories=order, ordered=True)
     return out.sort_values("CAMPAÑA").reset_index(drop=True)
 
 # --------------------------
@@ -733,49 +841,7 @@ else:
 st.divider()
 
 # --------------------------
-# NUEVA VISTA 1: ESTRUCTURA vs RENDIMIENTO
-# --------------------------
-st.subheader("Estructura vs rendimiento")
-
-if dff.empty:
-    st.warning("No hay datos con los filtros actuales.")
-else:
-    struct_x_options = [
-        c for c in [
-            "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-            "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
-            "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
-            "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
-            "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
-        ] if c in dff.columns
-    ]
-
-    struct_pick = st.selectbox("Variable de estructura (X)", struct_x_options, index=0 if struct_x_options else 0)
-
-    level_struct = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
-    agg_y = aggregate_level(dff, level_struct, "KG/HA").rename(columns={"y_pond": "KG/HA_pond"})
-    agg_x = aggregate_level(dff, level_struct, struct_pick)[level_struct + ["y_pond"]].rename(columns={"y_pond": "X_pond"})
-    struct_df = agg_y.merge(agg_x, on=level_struct, how="left")
-
-    fig_struct = px.scatter(
-        struct_df,
-        x="X_pond",
-        y="KG/HA_pond",
-        color="CAMPAÑA",
-        hover_data=["ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum"],
-        title=f"{struct_pick} vs KG/HA ponderado"
-    )
-    fig_struct.update_layout(
-        xaxis_title=struct_pick,
-        yaxis_title="KG/HA_pond"
-    )
-    st.plotly_chart(fig_struct, use_container_width=True)
-
-st.divider()
-
-# --------------------------
-# NUEVA VISTA 2: KG/HA por EDAD y CAMPAÑA
-# AJUSTADA para mejor interpretación y orden correcto del eje X
+# NUEVA VISTA 1: KG/HA por EDAD y CAMPAÑA
 # --------------------------
 st.subheader("KG/HA ponderado por edad y campaña")
 
@@ -815,7 +881,7 @@ else:
 st.divider()
 
 # --------------------------
-# NUEVA VISTA 3: DENSIDAD vs RENDIMIENTO
+# NUEVA VISTA 2: DENSIDAD vs RENDIMIENTO
 # --------------------------
 st.subheader("Densidad vs rendimiento")
 
@@ -844,52 +910,181 @@ else:
 st.divider()
 
 # --------------------------
-# FLORES vs CUAJADO (cap 100%)
-# MOVIDA antes del mapa de correlaciones
-# --------------------------
-st.subheader("Flores vs Cuajado (conversión)")
-
-c1, c2, c3, c4 = st.columns(4)
-flores_sum = float(pd.to_numeric(dff["FLORES"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
-cuaj_sum = float(pd.to_numeric(dff["FRUTO CUAJADO"], errors="coerce").sum(skipna=True)) if not dff.empty else 0.0
-
-ratio = (cuaj_sum / flores_sum) if flores_sum > 0 else np.nan
-ratio_cap = min(max(ratio, 0), 1) if pd.notna(ratio) else np.nan
-no_cuaj = 1 - ratio_cap if pd.notna(ratio_cap) else np.nan
-
-c1.metric("FLORES (suma)", f"{flores_sum:,.0f}")
-c2.metric("FRUTO CUAJADO (suma)", f"{cuaj_sum:,.0f}")
-c3.metric("% Cuajado (cap 100%)", f"{ratio_cap*100:,.2f}%" if pd.notna(ratio_cap) else "NA")
-c4.metric("% No cuajó", f"{no_cuaj*100:,.2f}%" if pd.notna(no_cuaj) else "NA")
-
-if not dff.empty:
-    tmp = (
-        dff.groupby("CAMPAÑA", dropna=False)
-        .agg(FLORES=("FLORES", "sum"), CUAJ=("FRUTO CUAJADO", "sum"))
-        .reset_index()
-    )
-    campaign_order = _sort_campaign_categories(tmp["CAMPAÑA"])
-    tmp["CAMPAÑA"] = pd.Categorical(tmp["CAMPAÑA"].astype(str), categories=campaign_order, ordered=True)
-    tmp["%_CUAJADO"] = np.where(tmp["FLORES"] > 0, (tmp["CUAJ"] / tmp["FLORES"]), np.nan) * 100
-    tmp["%_CUAJADO"] = tmp["%_CUAJADO"].clip(lower=0, upper=100)
-    tmp = tmp.sort_values("CAMPAÑA")
-
-    fig_cuaj = px.bar(
-        tmp, x="CAMPAÑA", y="%_CUAJADO",
-        category_orders={"CAMPAÑA": campaign_order},
-        title="% Cuajado por campaña (sum Cuaj / sum Flores, cap 100%)"
-    )
-    fig_cuaj.update_layout(
-        xaxis=dict(type="category", categoryorder="array", categoryarray=campaign_order),
-        yaxis=dict(range=[0, 100])
-    )
-    st.plotly_chart(fig_cuaj, use_container_width=True)
-
-st.divider()
-
-# --------------------------
 # CORRELACIONES
 # --------------------------
 st.subheader("Mapa de correlaciones (solo columnas seleccionadas)")
 fig_corr = corr_heatmap(dff)
 st.plotly_chart(fig_corr, use_container_width=True)
+
+st.divider()
+
+# --------------------------
+# INDICE DE VIGOR VEGETATIVO POST-PODA
+# --------------------------
+st.subheader("Índice de vigor vegetativo post-poda")
+
+unit_vigor = build_vigor_unit_table(df, dff)
+
+if unit_vigor.empty or unit_vigor["INDICE_VIGOR"].notna().sum() == 0:
+    st.warning("No hay suficientes datos estructurales para calcular el índice de vigor con los filtros actuales.")
+else:
+    # 1) Tabla resumen por unidad productiva
+    st.markdown("### Resumen del índice por unidad productiva")
+    show_cols = [
+        "CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
+        "EDAD PLANTA FINAL", "TIPO PODA", "INDICE_VIGOR", "KG/HA_pond", "N_VARS_VIGOR"
+    ]
+    show_cols = [c for c in show_cols if c in unit_vigor.columns]
+    st.dataframe(
+        unit_vigor[show_cols].sort_values(["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]).style.format({
+            "INDICE_VIGOR": "{:,.4f}",
+            "KG/HA_pond": "{:,.2f}",
+        }),
+        use_container_width=True
+    )
+
+    st.divider()
+
+    # 2) Índice agregado por campaña
+    st.markdown("### Índice de vigor por campaña")
+    vig_camp = vigor_summary_by_campaign(unit_vigor)
+
+    fig_vig_camp = go.Figure()
+    fig_vig_camp.add_trace(go.Bar(
+        x=vig_camp["CAMPAÑA"].astype(str),
+        y=vig_camp["INDICE_VIGOR"],
+        name="Índice de vigor"
+    ))
+    fig_vig_camp.add_trace(go.Scatter(
+        x=vig_camp["CAMPAÑA"].astype(str),
+        y=vig_camp["KG/HA_pond"],
+        mode="lines+markers",
+        name="KG/HA promedio",
+        yaxis="y2"
+    ))
+    fig_vig_camp.update_layout(
+        title="Índice de vigor y KG/HA promedio por campaña",
+        xaxis=dict(type="category"),
+        yaxis=dict(title="Índice de vigor"),
+        yaxis2=dict(title="KG/HA", overlaying="y", side="right"),
+        height=450
+    )
+    st.plotly_chart(fig_vig_camp, use_container_width=True)
+
+    st.divider()
+
+    # 3) Índice por edad de planta
+    st.markdown("### Índice de vigor por edad de planta")
+    age_order = ["1", "2", "3+"]
+    age_vig = (
+        unit_vigor.assign(**{"EDAD PLANTA FINAL": unit_vigor["EDAD PLANTA FINAL"].astype(str)})
+        .groupby("EDAD PLANTA FINAL", dropna=False)
+        .agg(
+            INDICE_VIGOR=("INDICE_VIGOR", "mean"),
+            KG_HA_PROM=("KG/HA_pond", "mean"),
+            N=("INDICE_VIGOR", "count")
+        )
+        .reset_index()
+    )
+    age_vig["EDAD PLANTA FINAL"] = pd.Categorical(age_vig["EDAD PLANTA FINAL"], categories=age_order, ordered=True)
+    age_vig = age_vig.sort_values("EDAD PLANTA FINAL")
+
+    fig_age_vig = go.Figure()
+    fig_age_vig.add_trace(go.Bar(
+        x=age_vig["EDAD PLANTA FINAL"].astype(str),
+        y=age_vig["INDICE_VIGOR"],
+        name="Índice de vigor"
+    ))
+    fig_age_vig.add_trace(go.Scatter(
+        x=age_vig["EDAD PLANTA FINAL"].astype(str),
+        y=age_vig["KG_HA_PROM"],
+        mode="lines+markers",
+        name="KG/HA promedio",
+        yaxis="y2"
+    ))
+    fig_age_vig.update_layout(
+        title="Índice de vigor y KG/HA promedio por edad de planta",
+        xaxis=dict(type="category"),
+        yaxis=dict(title="Índice de vigor"),
+        yaxis2=dict(title="KG/HA", overlaying="y", side="right"),
+        height=450
+    )
+    st.plotly_chart(fig_age_vig, use_container_width=True)
+
+    st.divider()
+
+    # 4) Índice por tipo de poda
+    st.markdown("### Índice de vigor por tipo de poda")
+    poda_vig = (
+        unit_vigor.groupby("TIPO PODA", dropna=False)
+        .agg(
+            INDICE_VIGOR=("INDICE_VIGOR", "mean"),
+            KG_HA_PROM=("KG/HA_pond", "mean"),
+            N=("INDICE_VIGOR", "count")
+        )
+        .reset_index()
+    )
+
+    if not poda_vig.empty:
+        fig_poda_vig = go.Figure()
+        fig_poda_vig.add_trace(go.Bar(
+            x=poda_vig["TIPO PODA"].astype(str),
+            y=poda_vig["INDICE_VIGOR"],
+            name="Índice de vigor"
+        ))
+        fig_poda_vig.add_trace(go.Scatter(
+            x=poda_vig["TIPO PODA"].astype(str),
+            y=poda_vig["KG_HA_PROM"],
+            mode="lines+markers",
+            name="KG/HA promedio",
+            yaxis="y2"
+        ))
+        fig_poda_vig.update_layout(
+            title="Índice de vigor y KG/HA promedio por tipo de poda",
+            xaxis=dict(type="category"),
+            yaxis=dict(title="Índice de vigor"),
+            yaxis2=dict(title="KG/HA", overlaying="y", side="right"),
+            height=450
+        )
+        st.plotly_chart(fig_poda_vig, use_container_width=True)
+
+    st.divider()
+
+    # 5) Relación índice de vigor vs KG/HA
+    st.markdown("### Relación entre índice de vigor y KG/HA")
+    fig_vig_scatter = px.scatter(
+        unit_vigor,
+        x="INDICE_VIGOR",
+        y="KG/HA_pond",
+        color="CAMPAÑA",
+        hover_data=["ETAPA", "CAMPO", "TURNO", "VARIEDAD", "EDAD PLANTA FINAL", "TIPO PODA"],
+        title="Índice de vigor vs KG/HA por unidad productiva"
+    )
+    fig_vig_scatter.update_layout(
+        xaxis_title="Índice de vigor vegetativo",
+        yaxis_title="KG/HA ponderado"
+    )
+    st.plotly_chart(fig_vig_scatter, use_container_width=True)
+
+    st.divider()
+
+    # 6) Composición del índice (promedio de variables normalizadas)
+    st.markdown("### Composición del índice de vigor (promedio de variables normalizadas)")
+    comp_cols = [f"{c}_NORM" for c in VIGOR_VARS if f"{c}_NORM" in unit_vigor.columns]
+    if comp_cols:
+        comp_means = unit_vigor[comp_cols].mean(skipna=True).reset_index()
+        comp_means.columns = ["VARIABLE", "PROM_NORM"]
+        comp_means["VARIABLE"] = comp_means["VARIABLE"].str.replace("_NORM", "", regex=False)
+
+        fig_comp = px.bar(
+            comp_means.sort_values("PROM_NORM", ascending=True),
+            x="PROM_NORM",
+            y="VARIABLE",
+            orientation="h",
+            title="Promedio normalizado de variables estructurales usadas en el índice"
+        )
+        fig_comp.update_layout(
+            xaxis_title="Promedio normalizado",
+            yaxis_title="Variable"
+        )
+        st.plotly_chart(fig_comp, use_container_width=True)
