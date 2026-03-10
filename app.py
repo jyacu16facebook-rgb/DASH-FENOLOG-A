@@ -5,13 +5,11 @@
 # - Filtros: Fundo, Etapa, Campo, Turno, Variedad, Semana, Campaña, EDAD PLANTA FINAL
 # - Métricas:
 #   * KG = SUMA(kilogramos)  (sin ponderar)
-#   * KG/HA = promedio simple
-#   * PESO / CALIBRE = promedios ponderados por Ha COSECHADA (excepto donde se pida simple)
+#   * KG/HA resumen campaña = SUMA(kilogramos) / SUMA(Ha COSECHADA)
+#   * Scatter:
+#       - si Y = KG/HA => promedio simple por unidad
+#       - si Y = PESO / CALIBRE => ponderado por Ha COSECHADA
 #   * Área ejecutada = SUMA(Ha COSECHADA)
-# - Scatter:
-#   * si Y = KG/HA => promedio simple
-#   * si Y = PESO / CALIBRE => ponderado por Ha COSECHADA
-#   * separación por CAMPAÑA (no todo junto)
 # - Boxplots:
 #   * KG/HA simple por SIEMBRA FINAL
 #   * KG/HA simple por EDAD PLANTA FINAL
@@ -24,8 +22,7 @@
 #   respetando el TURNO como unidad única para evitar duplicar área por semana
 # - Vistas agregadas:
 #   (1) KG/HA por edad y campaña
-#   (2) Densidad vs rendimiento
-#   (3) Índice de vigor vegetativo post-poda
+#   (2) Índice de vigor vegetativo post-poda
 # ==========================================================
 
 import os
@@ -138,6 +135,13 @@ def weighted_mean(x: pd.Series, w: pd.Series) -> float:
         return np.nan
     return float(np.average(x[mask], weights=w[mask]))
 
+def ratio_sum_over_sum(num: pd.Series, den: pd.Series) -> float:
+    num_sum = float(pd.to_numeric(num, errors="coerce").sum(skipna=True))
+    den_sum = float(pd.to_numeric(den, errors="coerce").sum(skipna=True))
+    if den_sum <= 0:
+        return np.nan
+    return num_sum / den_sum
+
 def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
     if "EDAD PLANTA FINAL" in df.columns:
         df["EDAD PLANTA FINAL"] = df["EDAD PLANTA FINAL"].astype(str).str.strip()
@@ -197,7 +201,7 @@ def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
         out.append({
             "CAMPAÑA": str(camp),
             "KG": float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True)),
-            "KG/HA": simple_mean(g["KG/HA"]),
+            "KG/HA": ratio_sum_over_sum(g["kilogramos"], g["Ha COSECHADA"]),
             "PESO BAYA (g)": weighted_mean(g["PESO BAYA (g)"], g[W_COL]),
             "CALIBRE BAYA (mm)": weighted_mean(g["CALIBRE BAYA (mm)"], g[W_COL]),
             "ÁREA EJECUTADA (Ha COSECHADA)": float(pd.to_numeric(g[W_COL], errors="coerce").sum(skipna=True)),
@@ -220,6 +224,8 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
 
         if mode == "simple":
             rec["y_val"] = simple_mean(g[y_col])
+        elif mode == "ratio_kg_area":
+            rec["y_val"] = ratio_sum_over_sum(g["kilogramos"], g["Ha COSECHADA"])
         else:
             rec["y_val"] = weighted_mean(g[y_col], g[W_COL])
 
@@ -424,6 +430,7 @@ def build_vigor_unit_table(df_full: pd.DataFrame, dff_filtered: pd.DataFrame) ->
     if dff_filtered.empty:
         return pd.DataFrame()
 
+        # Base filtrada a nivel unidad productiva
     agg_dict = {col: (col, first_valid) for col in VIGOR_VARS if col in dff_filtered.columns}
     agg_dict.update({
         "EDAD PLANTA FINAL": ("EDAD PLANTA FINAL", first_valid),
@@ -566,7 +573,7 @@ dff = apply_filters(df, camp_f, fundo_f, etapa_f, campo_f, turno_f, variedad_f, 
 # --------------------------
 # RESUMEN POR CAMPAÑA
 # --------------------------
-st.subheader("Resumen por campaña (KG/HA promedio simple)")
+st.subheader("Resumen por campaña (KG/HA = KG total / área ejecutada total)")
 
 res_camp = campaign_summary(dff)
 st.dataframe(
@@ -581,7 +588,7 @@ st.dataframe(
 )
 
 # --------------------------
-# SCATTER: X vs MÉTRICA Y + separación por campaña
+# SCATTER: X vs MÉTRICA por campaña (un solo gráfico)
 # --------------------------
 st.subheader("Dispersión (X vs métrica) por campaña")
 
@@ -615,51 +622,58 @@ with right:
     if dff.empty or not x_col:
         st.warning("No hay datos con los filtros actuales.")
     else:
-        level = ["CAMPAÑA", "TURNO"]
+        level = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
 
-        y_mode = "simple" if y_col == "KG/HA" else "weighted"
-        x_mode = "simple" if x_col == "KG/HA" else "weighted"
+        if y_col == "KG/HA":
+            y_mode = "ratio_kg_area"
+            y_title = "KG/HA (KG total / área ejecutada)"
+        else:
+            y_mode = "weighted"
+            y_title = f"{y_label} (ponderado)"
+
+        if x_col == "KG/HA":
+            x_mode = "ratio_kg_area"
+        else:
+            x_mode = "simple" if x_col in ["FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+                                           "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
+                                           "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+                                           "EDAD PLANTA", "SEMANA DE SIEMBRA",
+                                           "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+                                           "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+                                           "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+                                           "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"] else "weighted"
 
         agg_sc = aggregate_level(dff, level, y_col, mode=y_mode).rename(columns={"y_val": "Y_val"})
-        tmpx = aggregate_level(dff, level, x_col, mode=x_mode)[["CAMPAÑA", "TURNO", "y_val"]].rename(columns={"y_val": "X_val"})
-        agg_sc = agg_sc.merge(tmpx, on=["CAMPAÑA", "TURNO"], how="left")
+        tmpx = aggregate_level(dff, level, x_col, mode=x_mode)[level + ["y_val"]].rename(columns={"y_val": "X_val"})
+        agg_sc = agg_sc.merge(tmpx, on=level, how="left")
 
         agg_sc["CAMPAÑA"] = agg_sc["CAMPAÑA"].astype(str)
         agg_sc["POINT"] = "NORMAL"
 
         if not agg_sc.empty and agg_sc["Y_val"].notna().any():
-            marked = []
             for camp, g in agg_sc.groupby("CAMPAÑA", dropna=False):
                 g2 = g.dropna(subset=["Y_val"])
                 if g2.empty:
                     continue
                 idx_best = g2["Y_val"].idxmax()
                 idx_worst = g2["Y_val"].idxmin()
-                marked.extend([idx_best, idx_worst])
-
                 agg_sc.loc[idx_best, "POINT"] = "BEST"
                 agg_sc.loc[idx_worst, "POINT"] = "WORST"
 
-        n_camps = agg_sc["CAMPAÑA"].nunique()
-        facet_wrap = 2 if n_camps <= 4 else 3
-
-        title_sc = f"{x_col} vs {y_label} | Nivel: TURNO | separado por CAMPAÑA"
         fig_sc = px.scatter(
             agg_sc,
             x="X_val",
             y="Y_val",
-            color="POINT",
-            facet_col="CAMPAÑA" if n_camps > 1 else None,
-            facet_col_wrap=facet_wrap if n_camps > 1 else None,
-            hover_data=["CAMPAÑA", "TURNO", "w_sum", "kg_sum", "POINT"],
-            title=title_sc,
+            color="CAMPAÑA",
+            symbol="POINT",
+            hover_data=["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum", "POINT"],
+            title=f"{x_col} vs {y_label} | Nivel: unidad productiva"
         )
 
-        y_title = f"{y_label} (promedio simple)" if y_col == "KG/HA" else f"{y_label} (ponderado)"
         fig_sc.update_layout(
             xaxis_title=x_col,
             yaxis_title=y_title,
-            legend_title="POINT"
+            legend_title="CAMPAÑA",
         )
         st.plotly_chart(fig_sc, use_container_width=True)
 
@@ -941,35 +955,6 @@ else:
         yaxis=dict(title="KG/HA_pond")
     )
     st.plotly_chart(fig_agecamp, use_container_width=True)
-
-st.divider()
-
-# --------------------------
-# NUEVA VISTA 2: DENSIDAD vs RENDIMIENTO
-# --------------------------
-st.subheader("Densidad vs rendimiento")
-
-if dff.empty:
-    st.warning("No hay datos con los filtros actuales.")
-else:
-    level_den = ["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
-    agg_y = aggregate_level(dff, level_den, "KG/HA", mode="weighted").rename(columns={"y_val": "KG/HA_pond"})
-    agg_x = aggregate_level(dff, level_den, "DENSIDAD", mode="weighted")[level_den + ["y_val"]].rename(columns={"y_val": "DENSIDAD_pond"})
-    den_df = agg_y.merge(agg_x, on=level_den, how="left")
-
-    fig_den = px.scatter(
-        den_df,
-        x="DENSIDAD_pond",
-        y="KG/HA_pond",
-        color="CAMPAÑA",
-        hover_data=["ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum"],
-        title="DENSIDAD vs KG/HA ponderado"
-    )
-    fig_den.update_layout(
-        xaxis_title="DENSIDAD",
-        yaxis_title="KG/HA_pond"
-    )
-    st.plotly_chart(fig_den, use_container_width=True)
 
 st.divider()
 
