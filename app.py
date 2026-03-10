@@ -33,7 +33,8 @@ COLS_REQUIRED = [
     "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
     "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
     "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT",
-    "SIEMBRA", "SIEMBRA FINAL"
+    "SIEMBRA", "SIEMBRA FINAL",
+    "SEG DENSIDAD"
 ]
 
 W_COL = "Ha COSECHADA"
@@ -135,7 +136,7 @@ def apply_filters(df: pd.DataFrame,
     if variedad:
         dff = dff[dff["VARIEDAD"].isin(variedad)]
     if edad_final:
-        dff = dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]
+        dff = dff[dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]]
 
     dff = dff[(dff["SEMANA"] >= semana_min) & (dff["SEMANA"] <= semana_max)]
     return dff
@@ -700,6 +701,51 @@ else:
         yaxis=dict(title="PESO")
     )
     st.plotly_chart(fig_peso_siem, use_container_width=True)
+
+    st.divider()
+
+    # --------------------------
+    # NUEVO BOXPLOT: SEG DENSIDAD
+    # --------------------------
+    st.subheader("SEG DENSIDAD")
+    st.caption("Compara SEG DENSIDAD con métrica dinámica: KG/HA o KG/PLANTA.")
+
+    metric_seg_pick = st.selectbox(
+        "Métrica Y para SEG DENSIDAD",
+        ["KG/HA", "KG/PLANTA"],
+        index=0
+    )
+
+    turn_level_seg = UNIT_COLS_BASE + ["SEG DENSIDAD"]
+
+    if metric_seg_pick == "KG/HA":
+        agg_turn_seg = aggregate_level(
+            dff, turn_level_seg, "KG/HA", mode="ratio_kg_area_turno"
+        ).rename(columns={"y_val": "METRIC_VAL"})
+    else:
+        agg_turn_seg = aggregate_level(
+            dff, turn_level_seg, "KG/PLANTA", mode="ratio_kg_planta_turno"
+        ).rename(columns={"y_val": "METRIC_VAL"})
+
+    agg_turn_seg["SEG DENSIDAD"] = agg_turn_seg["SEG DENSIDAD"].astype(str).str.strip()
+    agg_turn_seg = agg_turn_seg.replace({"SEG DENSIDAD": {"nan": np.nan, "None": np.nan, "": np.nan}})
+    agg_turn_seg = agg_turn_seg.dropna(subset=["SEG DENSIDAD", "METRIC_VAL"]).copy()
+
+    if agg_turn_seg.empty:
+        st.info("No hay datos suficientes para SEG DENSIDAD.")
+    else:
+        fig_seg = px.box(
+            agg_turn_seg,
+            x="SEG DENSIDAD",
+            y="METRIC_VAL",
+            points="outliers",
+            title=f"{metric_seg_pick} por SEG DENSIDAD"
+        )
+        fig_seg.update_layout(
+            xaxis=dict(type="category", title="SEG DENSIDAD"),
+            yaxis=dict(title=metric_seg_pick)
+        )
+        st.plotly_chart(fig_seg, use_container_width=True)
 
     st.divider()
 
