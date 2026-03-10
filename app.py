@@ -448,13 +448,10 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
         return out
 
     grouped = []
-    valid_group_names = []
-
     for gname, gdf in tmp.groupby(group_col, dropna=False):
         vals = pd.to_numeric(gdf[value_col], errors="coerce").dropna().values
         if len(vals) > 0:
             grouped.append(vals)
-            valid_group_names.append(gname)
 
     out["n"] = int(sum(len(v) for v in grouped))
     out["grupos"] = int(len(grouped))
@@ -525,9 +522,9 @@ def render_variance_metrics(result: dict):
     def card(label, value):
         st.markdown(
             f"""
-            <div style="padding-top:4px; padding-bottom:4px;">
-                <div style="font-size:15px; color:#555; margin-bottom:2px;">{label}</div>
-                <div style="font-size:28px; font-weight:600; line-height:1.1; white-space:nowrap;">{value}</div>
+            <div style="padding-top:2px; padding-bottom:2px;">
+                <div style="font-size:12px; color:#555; margin-bottom:2px; white-space:nowrap;">{label}</div>
+                <div style="font-size:16px; font-weight:600; line-height:1.15; word-break:break-word;">{value}</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -746,10 +743,7 @@ with right:
             else:
                 st.metric("r de Pearson", "NA")
         with m2:
-            if pd.notna(pearson_p):
-                st.metric("p-valor", f"{pearson_p:.4g}")
-            else:
-                st.metric("p-valor", "NA")
+            st.metric("p-valor", format_p_value_decimal(pearson_p))
         with m3:
             st.metric("N", f"{pearson_n:,}")
 
