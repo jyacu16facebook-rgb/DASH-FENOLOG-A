@@ -464,7 +464,6 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
 
     normality_flags = []
     for vals in grouped:
-        # Para ANOVA exigimos muestra mínima razonable y variación dentro del grupo
         if len(vals) < 3 or len(np.unique(vals)) < 2:
             normality_flags.append(False)
             continue
@@ -492,7 +491,6 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
 
     out["homocedasticidad_ok"] = homocedasticidad_ok
 
-    # Usa ANOVA solo si cumple normalidad + homocedasticidad
     if normalidad_ok and homocedasticidad_ok and all(len(vals) >= 2 for vals in grouped):
         try:
             stat, pval = f_oneway(*grouped)
@@ -504,7 +502,6 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
         except Exception:
             pass
 
-    # Si no cumple supuestos, usa Kruskal-Wallis
     try:
         stat, pval = kruskal(*grouped)
         out["prueba"] = "Kruskal-Wallis"
@@ -515,32 +512,47 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
     except Exception:
         return out
 
+def format_p_value_decimal(p):
+    if pd.isna(p):
+        return "NA"
+    if p < 0.000001:
+        return "0.000001"
+    return f"{p:.6f}"
+
 def render_variance_metrics(result: dict):
     c1, c2, c3, c4, c5 = st.columns(5)
 
+    def card(label, value):
+        st.markdown(
+            f"""
+            <div style="padding-top:4px; padding-bottom:4px;">
+                <div style="font-size:15px; color:#555; margin-bottom:2px;">{label}</div>
+                <div style="font-size:28px; font-weight:600; line-height:1.1; white-space:nowrap;">{value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     with c1:
-        st.metric("Prueba", result.get("prueba", "NA"))
+        card("Prueba", result.get("prueba", "NA"))
 
     with c2:
         est_name = result.get("estadistico_nombre", "NA")
         est_val = result.get("estadistico", np.nan)
         if pd.notna(est_val):
-            st.metric(f"Estadístico ({est_name})", f"{est_val:.4f}")
+            card(f"Estadístico ({est_name})", f"{est_val:.4f}")
         else:
-            st.metric(f"Estadístico ({est_name})", "NA")
+            card(f"Estadístico ({est_name})", "NA")
 
     with c3:
         pval = result.get("p_valor", np.nan)
-        if pd.notna(pval):
-            st.metric("p-valor", f"{pval:.4g}")
-        else:
-            st.metric("p-valor", "NA")
+        card("p-valor", format_p_value_decimal(pval))
 
     with c4:
-        st.metric("N", f"{int(result.get('n', 0)):,}")
+        card("N", f"{int(result.get('n', 0)):,}")
 
     with c5:
-        st.metric("Grupos", f"{int(result.get('grupos', 0))}")
+        card("Grupos", f"{int(result.get('grupos', 0))}")
 
     normalidad_txt = "Sí" if result.get("normalidad_ok", False) else "No"
     homoc_txt = "Sí" if result.get("homocedasticidad_ok", False) else "No"
