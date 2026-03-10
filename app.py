@@ -10,6 +10,7 @@ import streamlit as st
 
 import plotly.express as px
 import plotly.graph_objects as go
+from scipy.stats import pearsonr
 
 # --------------------------
 # CONFIG
@@ -136,7 +137,7 @@ def apply_filters(df: pd.DataFrame,
     if variedad:
         dff = dff[dff["VARIEDAD"].isin(variedad)]
     if edad_final:
-        dff = dff[dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]]
+        dff = dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]
 
     dff = dff[(dff["SEMANA"] >= semana_min) & (dff["SEMANA"] <= semana_max)]
     return dff
@@ -409,6 +410,19 @@ def compute_full_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
 
     return [low, high]
 
+def compute_pearson_stats(x: pd.Series, y: pd.Series):
+    tmp = pd.DataFrame({"x": pd.to_numeric(x, errors="coerce"), "y": pd.to_numeric(y, errors="coerce")}).dropna()
+    n = len(tmp)
+
+    if n < 3:
+        return np.nan, np.nan, n
+
+    if tmp["x"].nunique() < 2 or tmp["y"].nunique() < 2:
+        return np.nan, np.nan, n
+
+    r, p = pearsonr(tmp["x"], tmp["y"])
+    return float(r), float(p), int(n)
+
 # --------------------------
 # UI: HEADER
 # --------------------------
@@ -588,6 +602,21 @@ with right:
             fig_sc.update_yaxes(range=y_range)
 
         st.plotly_chart(fig_sc, use_container_width=True)
+
+        pearson_r, pearson_p, pearson_n = compute_pearson_stats(agg_sc["X_val"], agg_sc["Y_val"])
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            if pd.notna(pearson_r):
+                st.metric("r de Pearson", f"{pearson_r:.4f}")
+            else:
+                st.metric("r de Pearson", "NA")
+        with m2:
+            if pd.notna(pearson_p):
+                st.metric("p-valor", f"{pearson_p:.4g}")
+            else:
+                st.metric("p-valor", "NA")
+        with m3:
+            st.metric("N", f"{pearson_n:,}")
 
 st.divider()
 
