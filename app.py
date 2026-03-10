@@ -413,48 +413,27 @@ def build_siembra_final_biometric_summary(dff: pd.DataFrame, metric_col: str) ->
     summary["DELTA_SUELO_MENOS_MACETA"] = delta
     return summary
 
-def compute_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
+def compute_full_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
     """
-    Rango dinámico robusto para el eje Y del scatter.
-    Usa percentiles para evitar que pocos outliers aplasten visualmente la nube principal.
+    Eje dinámico usando TODO el rango real de los datos filtrados.
+    No recorta outliers.
+    Solo agrega un pequeño margen arriba y abajo.
     """
     s = pd.to_numeric(series, errors="coerce").dropna()
     if s.empty:
         return None
 
-    if len(s) == 1:
-        val = float(s.iloc[0])
-        pad = max(abs(val) * 0.10, 1)
-        low = 0 if lower_zero and val >= 0 else val - pad
-        high = val + pad
-        if high <= low:
-            high = low + 1
-        return [low, high]
-
-    q01 = float(s.quantile(0.01))
-    q99 = float(s.quantile(0.99))
     real_min = float(s.min())
     real_max = float(s.max())
 
-    # Si no hay una diferencia muy fuerte, usa todo el rango real
-    if real_max <= (q99 * 1.25 if q99 > 0 else real_max):
-        low = real_min
-        high = real_max
+    if real_min == real_max:
+        pad = max(abs(real_max) * 0.10, 1)
+        low = real_min - pad
+        high = real_max + pad
     else:
-        low = q01
-        high = q99
-
-    if pd.isna(low) or pd.isna(high):
-        return None
-
-    if low == high:
-        pad = max(abs(high) * 0.10, 1)
-        low -= pad
-        high += pad
-    else:
-        pad = (high - low) * 0.08
-        low -= pad
-        high += pad
+        pad = (real_max - real_min) * 0.08
+        low = real_min - pad
+        high = real_max + pad
 
     if lower_zero and high > 0:
         low = max(0, low)
@@ -713,7 +692,8 @@ with right:
             title=f"{x_col} vs {y_label} | Nivel: unidad productiva"
         )
 
-        y_range = compute_dynamic_axis_range(agg_sc["Y_val"], lower_zero=True)
+        # Eje Y dinámico con TODO el rango real de KG/HA visible
+        y_range = compute_full_dynamic_axis_range(agg_sc["Y_val"], lower_zero=True)
 
         fig_sc.update_layout(
             xaxis_title=x_col,
