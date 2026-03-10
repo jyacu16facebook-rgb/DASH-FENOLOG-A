@@ -10,7 +10,7 @@ import streamlit as st
 
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, shapiro, levene, f_oneway, kruskal
 
 # --------------------------
 # CONFIG
@@ -423,6 +423,129 @@ def compute_pearson_stats(x: pd.Series, y: pd.Series):
     r, p = pearsonr(tmp["x"], tmp["y"])
     return float(r), float(p), int(n)
 
+def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: str) -> dict:
+    out = {
+        "prueba": "NA",
+        "estadistico_nombre": "NA",
+        "estadistico": np.nan,
+        "p_valor": np.nan,
+        "n": 0,
+        "grupos": 0,
+        "normalidad_ok": False,
+        "homocedasticidad_ok": False,
+    }
+
+    if df_plot.empty or group_col not in df_plot.columns or value_col not in df_plot.columns:
+        return out
+
+    tmp = df_plot[[group_col, value_col]].copy()
+    tmp[group_col] = tmp[group_col].astype(str).str.strip()
+    tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
+    tmp = tmp.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
+    tmp = tmp.dropna(subset=[group_col, value_col]).copy()
+
+    if tmp.empty:
+        return out
+
+    grouped = []
+    valid_group_names = []
+
+    for gname, gdf in tmp.groupby(group_col, dropna=False):
+        vals = pd.to_numeric(gdf[value_col], errors="coerce").dropna().values
+        if len(vals) > 0:
+            grouped.append(vals)
+            valid_group_names.append(gname)
+
+    out["n"] = int(sum(len(v) for v in grouped))
+    out["grupos"] = int(len(grouped))
+
+    if len(grouped) < 2:
+        return out
+
+    normality_flags = []
+    for vals in grouped:
+        # Para ANOVA exigimos muestra mínima razonable y variación dentro del grupo
+        if len(vals) < 3 or len(np.unique(vals)) < 2:
+            normality_flags.append(False)
+            continue
+
+        vals_test = vals
+        if len(vals_test) > 5000:
+            vals_test = np.random.default_rng(42).choice(vals_test, size=5000, replace=False)
+
+        try:
+            _, p_norm = shapiro(vals_test)
+            normality_flags.append(bool(p_norm > 0.05))
+        except Exception:
+            normality_flags.append(False)
+
+    normalidad_ok = all(normality_flags) if normality_flags else False
+    out["normalidad_ok"] = normalidad_ok
+
+    homocedasticidad_ok = False
+    if all(len(vals) >= 2 for vals in grouped):
+        try:
+            _, p_lev = levene(*grouped, center="median")
+            homocedasticidad_ok = bool(p_lev > 0.05)
+        except Exception:
+            homocedasticidad_ok = False
+
+    out["homocedasticidad_ok"] = homocedasticidad_ok
+
+    # Usa ANOVA solo si cumple normalidad + homocedasticidad
+    if normalidad_ok and homocedasticidad_ok and all(len(vals) >= 2 for vals in grouped):
+        try:
+            stat, pval = f_oneway(*grouped)
+            out["prueba"] = "ANOVA"
+            out["estadistico_nombre"] = "F"
+            out["estadistico"] = float(stat)
+            out["p_valor"] = float(pval)
+            return out
+        except Exception:
+            pass
+
+    # Si no cumple supuestos, usa Kruskal-Wallis
+    try:
+        stat, pval = kruskal(*grouped)
+        out["prueba"] = "Kruskal-Wallis"
+        out["estadistico_nombre"] = "H"
+        out["estadistico"] = float(stat)
+        out["p_valor"] = float(pval)
+        return out
+    except Exception:
+        return out
+
+def render_variance_metrics(result: dict):
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        st.metric("Prueba", result.get("prueba", "NA"))
+
+    with c2:
+        est_name = result.get("estadistico_nombre", "NA")
+        est_val = result.get("estadistico", np.nan)
+        if pd.notna(est_val):
+            st.metric(f"Estadístico ({est_name})", f"{est_val:.4f}")
+        else:
+            st.metric(f"Estadístico ({est_name})", "NA")
+
+    with c3:
+        pval = result.get("p_valor", np.nan)
+        if pd.notna(pval):
+            st.metric("p-valor", f"{pval:.4g}")
+        else:
+            st.metric("p-valor", "NA")
+
+    with c4:
+        st.metric("N", f"{int(result.get('n', 0)):,}")
+
+    with c5:
+        st.metric("Grupos", f"{int(result.get('grupos', 0))}")
+
+    normalidad_txt = "Sí" if result.get("normalidad_ok", False) else "No"
+    homoc_txt = "Sí" if result.get("homocedasticidad_ok", False) else "No"
+    st.caption(f"Supuestos evaluados para ANOVA → Normalidad: {normalidad_txt} | Homogeneidad de varianzas: {homoc_txt}")
+
 # --------------------------
 # UI: HEADER
 # --------------------------
@@ -694,6 +817,9 @@ else:
         )
         st.plotly_chart(fig_siem, use_container_width=True)
 
+        anova_siem = analyze_variance_by_group(agg_turn_kgha, "SIEMBRA FINAL", "KG_HA")
+        render_variance_metrics(anova_siem)
+
     with b2:
         agg_turn_kgha["EDAD PLANTA FINAL"] = agg_turn_kgha["EDAD PLANTA FINAL"].astype(str)
         order_age = ["1", "2", "3+"]
@@ -710,6 +836,9 @@ else:
             yaxis=dict(title="KG/HA")
         )
         st.plotly_chart(fig_age, use_container_width=True)
+
+        anova_age = analyze_variance_by_group(agg_turn_kgha, "EDAD PLANTA FINAL", "KG_HA")
+        render_variance_metrics(anova_age)
 
     st.divider()
 
@@ -730,6 +859,9 @@ else:
         yaxis=dict(title="PESO")
     )
     st.plotly_chart(fig_peso_siem, use_container_width=True)
+
+    anova_peso = analyze_variance_by_group(agg_turn_peso, "SIEMBRA FINAL", "PESO")
+    render_variance_metrics(anova_peso)
 
     st.divider()
 
@@ -776,6 +908,9 @@ else:
         )
         st.plotly_chart(fig_seg, use_container_width=True)
 
+        anova_seg = analyze_variance_by_group(agg_turn_seg, "SEG DENSIDAD", "METRIC_VAL")
+        render_variance_metrics(anova_seg)
+
     st.divider()
 
     st.subheader("Biometría")
@@ -811,6 +946,9 @@ else:
                 yaxis=dict(title=biom_col_pick)
             )
             st.plotly_chart(fig_bio, use_container_width=True)
+
+            anova_bio = analyze_variance_by_group(bio_df, "SIEMBRA FINAL", biom_col_pick)
+            render_variance_metrics(anova_bio)
 
     with bio_right:
         bio_summary = build_siembra_final_biometric_summary(dff, biom_col_pick)
