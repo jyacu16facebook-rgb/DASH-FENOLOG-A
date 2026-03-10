@@ -1,27 +1,6 @@
 # app.py
 # ==========================================================
 # DASH: Fenología y estructura vs rendimiento
-# - Carga AUTOMÁTICA desde archivo local en repo (xlsx) | Hoja: DATA
-# - Filtros: Fundo, Etapa, Campo, Turno, Variedad, Semana, Campaña, EDAD PLANTA FINAL
-# - Métricas principales ajustadas:
-#   * KG = SUMA(kilogramos)
-#   * KG/HA = SUMA(kilogramos) / SUMA(Ha TURNO única)
-#   * Área resumen campaña = SUMA(Ha TURNO única)
-#   * Scatter:
-#       - Y = KG/HA => KG total / Ha TURNO única
-#       - Y = KG/PLANTA => KG total / SUMA(Ha TURNO única × DENSIDAD única)
-#       - Y = PESO / CALIBRE => ponderado por Ha COSECHADA (se mantiene)
-#   * Boxplots KG/HA:
-#       - KG total / Ha TURNO única
-#   * Boxplot PESO BAYA:
-#       - ponderado por kilogramos
-#   * KG/PLANTA campaña:
-#       - KG total / SUMA(Ha TURNO única × DENSIDAD única)
-#       - equivalente a densidad ponderada por Ha TURNO
-#   * Variedades:
-#       - KG/HA = KG total / Ha TURNO única
-#   * KG/HA por edad:
-#       - KG total / Ha TURNO única
 # ==========================================================
 
 import os
@@ -59,7 +38,7 @@ COLS_REQUIRED = [
 
 W_COL = "Ha COSECHADA"
 
-# Unidad productiva única para evitar duplicar Ha TURNO por semana
+# Unidad productiva única
 UNIT_COLS_BASE = ["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD"]
 
 METRIC_Y_OPTIONS = {
@@ -95,6 +74,11 @@ BIOMETRIC_COLS = [
     "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
 ]
 
+SUM_X_COLS = [
+    "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+    "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO"
+]
+
 # --------------------------
 # HELPERS
 # --------------------------
@@ -114,6 +98,9 @@ def weighted_mean(x: pd.Series, w: pd.Series) -> float:
     if mask.sum() == 0:
         return np.nan
     return float(np.average(x[mask], weights=w[mask]))
+
+def sum_numeric(x: pd.Series) -> float:
+    return float(pd.to_numeric(x, errors="coerce").sum(skipna=True))
 
 def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
     if "EDAD PLANTA FINAL" in df.columns:
@@ -170,9 +157,6 @@ def first_valid(series: pd.Series):
     return s.iloc[0] if not s.empty else np.nan
 
 def build_unique_turno_table(df_subset: pd.DataFrame) -> pd.DataFrame:
-    """
-    Devuelve una tabla única por unidad productiva para no duplicar Ha TURNO por semana.
-    """
     if df_subset.empty:
         return pd.DataFrame(columns=UNIT_COLS_BASE + ["Ha_TURNO_u", "DENSIDAD_u"])
 
@@ -196,9 +180,6 @@ def unique_turno_area_sum(df_subset: pd.DataFrame) -> float:
     return float(base["Ha_TURNO_u"].sum(skipna=True))
 
 def unique_turno_plants_sum(df_subset: pd.DataFrame) -> float:
-    """
-    Total de plantas = SUMA(Ha TURNO única × DENSIDAD única)
-    """
     base = build_unique_turno_table(df_subset)
     if base.empty:
         return 0.0
@@ -206,23 +187,20 @@ def unique_turno_plants_sum(df_subset: pd.DataFrame) -> float:
     return float(base["PLANTAS_EST"].sum(skipna=True))
 
 def ratio_kg_over_unique_turno_area(df_subset: pd.DataFrame) -> float:
-    kg_sum = float(pd.to_numeric(df_subset["kilogramos"], errors="coerce").sum(skipna=True))
+    kg_sum = sum_numeric(df_subset["kilogramos"])
     area_sum = unique_turno_area_sum(df_subset)
     if area_sum <= 0:
         return np.nan
     return kg_sum / area_sum
 
 def ratio_kg_planta_over_unique_turno(df_subset: pd.DataFrame) -> float:
-    kg_sum = float(pd.to_numeric(df_subset["kilogramos"], errors="coerce").sum(skipna=True))
+    kg_sum = sum_numeric(df_subset["kilogramos"])
     plantas_sum = unique_turno_plants_sum(df_subset)
     if plantas_sum <= 0:
         return np.nan
     return kg_sum / plantas_sum
 
 def weighted_density_by_turno_area(df_subset: pd.DataFrame) -> float:
-    """
-    Densidad ponderada por Ha TURNO única.
-    """
     base = build_unique_turno_table(df_subset)
     if base.empty:
         return np.nan
@@ -231,18 +209,18 @@ def weighted_density_by_turno_area(df_subset: pd.DataFrame) -> float:
 def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=[
-            "CAMPAÑA", "KG", "KG/HA", "PESO BAYA (g)", "CALIBRE BAYA (mm)", "ÁREA TURNO ÚNICA (Ha TURNO)"
+            "CAMPAÑA", "KG", "KG/HA", "PESO", "CALIBRE", "ÁREA"
         ])
 
     out = []
     for camp, g in df.groupby("CAMPAÑA", dropna=False):
         out.append({
             "CAMPAÑA": str(camp),
-            "KG": float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True)),
+            "KG": sum_numeric(g["kilogramos"]),
             "KG/HA": ratio_kg_over_unique_turno_area(g),
-            "PESO BAYA (g)": weighted_mean(g["PESO BAYA (g)"], g[W_COL]),
-            "CALIBRE BAYA (mm)": weighted_mean(g["CALIBRE BAYA (mm)"], g[W_COL]),
-            "ÁREA TURNO ÚNICA (Ha TURNO)": unique_turno_area_sum(g),
+            "PESO": weighted_mean(g["PESO BAYA (g)"], g[W_COL]),
+            "CALIBRE": weighted_mean(g["CALIBRE BAYA (mm)"], g[W_COL]),
+            "ÁREA": unique_turno_area_sum(g),
         })
 
     res = pd.DataFrame(out)
@@ -252,7 +230,7 @@ def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = "weighted") -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=level_cols + ["y_val", "w_sum", "kg_sum", "area_turno_sum"])
+        return pd.DataFrame(columns=level_cols + ["y_val", "w_sum", "kg_sum", "area_sum"])
 
     rows = []
     for keys, g in df.groupby(level_cols, dropna=False):
@@ -262,6 +240,8 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
 
         if mode == "simple":
             rec["y_val"] = simple_mean(g[y_col])
+        elif mode == "sum":
+            rec["y_val"] = sum_numeric(g[y_col])
         elif mode == "weighted":
             rec["y_val"] = weighted_mean(g[y_col], g[W_COL])
         elif mode == "weighted_kg":
@@ -273,9 +253,9 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
         else:
             rec["y_val"] = np.nan
 
-        rec["w_sum"] = float(pd.to_numeric(g[W_COL], errors="coerce").sum(skipna=True))
-        rec["kg_sum"] = float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True))
-        rec["area_turno_sum"] = unique_turno_area_sum(g)
+        rec["w_sum"] = sum_numeric(g[W_COL])
+        rec["kg_sum"] = sum_numeric(g["kilogramos"])
+        rec["area_sum"] = unique_turno_area_sum(g)
         rows.append(rec)
 
     return pd.DataFrame(rows)
@@ -292,7 +272,7 @@ def corr_heatmap(df: pd.DataFrame) -> go.Figure:
     dd = dd[keep]
     if dd.shape[1] < 2:
         fig = go.Figure()
-        fig.add_annotation(text="No hay suficientes columnas numéricas con data para correlación.", showarrow=False)
+        fig.add_annotation(text="Sin datos suficientes.", showarrow=False)
         return fig
 
     corr = dd.corr(numeric_only=True)
@@ -308,7 +288,7 @@ def corr_heatmap(df: pd.DataFrame) -> go.Figure:
     fig.update_layout(
         height=600,
         margin=dict(l=10, r=10, t=30, b=10),
-        title="Mapa de correlaciones (solo columnas solicitadas)",
+        title="Correlaciones",
     )
     return fig
 
@@ -343,24 +323,23 @@ def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
 
 def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["CAMPAÑA", "KG/PLANTA_calc", "DENSIDAD_POND_HA_TURNO", "AREA_TURNO_UNICA"])
+        return pd.DataFrame(columns=["CAMPAÑA", "KG/PLANTA"])
 
     rows = []
     for camp, g in df.groupby("CAMPAÑA", dropna=False):
-        kg_total = float(pd.to_numeric(g["kilogramos"], errors="coerce").sum(skipna=True))
-        area_turno_total = unique_turno_area_sum(g)
+        kg_total = sum_numeric(g["kilogramos"])
+        area_total = unique_turno_area_sum(g)
         densidad_pond = weighted_density_by_turno_area(g)
         plantas_total = unique_turno_plants_sum(g)
-
         kg_planta = (kg_total / plantas_total) if plantas_total > 0 else np.nan
 
         rows.append({
             "CAMPAÑA": str(camp),
             "KG_TOTAL": kg_total,
-            "AREA_TURNO_UNICA": area_turno_total,
-            "DENSIDAD_POND_HA_TURNO": densidad_pond,
-            "PLANTAS_ESTIMADAS": plantas_total,
-            "KG/PLANTA_calc": kg_planta
+            "ÁREA": area_total,
+            "DENSIDAD": densidad_pond,
+            "PLANTAS": plantas_total,
+            "KG/PLANTA": kg_planta
         })
 
     out = pd.DataFrame(rows)
@@ -401,15 +380,10 @@ def build_siembra_final_biometric_summary(dff: pd.DataFrame, metric_col: str) ->
     if not prom_suelo.empty and not prom_maceta.empty:
         delta = float(prom_suelo.iloc[0] - prom_maceta.iloc[0])
 
-    summary["DELTA_SUELO_MENOS_MACETA"] = delta
+    summary["DELTA"] = delta
     return summary
 
 def compute_full_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
-    """
-    Eje dinámico usando TODO el rango real de los datos filtrados.
-    No recorta outliers.
-    Solo agrega un pequeño margen arriba y abajo.
-    """
     s = pd.to_numeric(series, errors="coerce").dropna()
     if s.empty:
         return None
@@ -437,18 +411,18 @@ def compute_full_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
 # --------------------------
 # UI: HEADER
 # --------------------------
-st.title("🫐 Fenología y estructura vs rendimiento (KG/HA) | Campañas 2022–2025")
+st.title("🫐 Fenología vs rendimiento | 2022–2025")
 
 # --------------------------
 # LOAD
 # --------------------------
 if not os.path.exists(DATA_FILE):
     st.error(
-        f"No encuentro el archivo **{DATA_FILE}** en la carpeta del app.\n\n"
-        "✅ Solución:\n"
-        "- Asegúrate que el Excel esté en el repo en la misma carpeta que `app.py`.\n"
-        f"- Que el nombre sea EXACTO: `{DATA_FILE}`\n"
-        f"- Y que la hoja se llame exactamente: `{REQ_SHEET}`"
+        f"No encuentro el archivo **{DATA_FILE}**.\n\n"
+        "Verifica:\n"
+        "- mismo folder que `app.py`\n"
+        f"- nombre exacto: `{DATA_FILE}`\n"
+        f"- hoja exacta: `{REQ_SHEET}`"
     )
     st.stop()
 
@@ -456,7 +430,7 @@ df_raw = read_excel_path(DATA_FILE, REQ_SHEET)
 
 missing = validate_cols(df_raw)
 if missing:
-    st.error("Faltan columnas requeridas en tu hoja DATA:")
+    st.error("Faltan columnas requeridas:")
     st.write(missing)
     st.stop()
 
@@ -501,31 +475,31 @@ with st.sidebar:
     edad_final_f = ms("EDAD PLANTA FINAL")
 
     sem_min, sem_max = int(df["SEMANA"].min()), int(df["SEMANA"].max())
-    smin, smax = st.slider("SEMANA (rango)", sem_min, sem_max, (sem_min, sem_max))
+    smin, smax = st.slider("SEMANA", sem_min, sem_max, (sem_min, sem_max))
 
 dff = apply_filters(df, camp_f, fundo_f, etapa_f, campo_f, turno_f, variedad_f, edad_final_f, smin, smax)
 
 # --------------------------
-# RESUMEN POR CAMPAÑA
+# RESUMEN
 # --------------------------
-st.subheader("Resumen por campaña (KG/HA = KG total / Ha TURNO única total)")
+st.subheader("Resumen por campaña")
 
 res_camp = campaign_summary(dff)
 st.dataframe(
     res_camp.style.format({
         "KG": "{:,.2f}",
         "KG/HA": "{:,.2f}",
-        "PESO BAYA (g)": "{:,.2f}",
-        "CALIBRE BAYA (mm)": "{:,.2f}",
-        "ÁREA TURNO ÚNICA (Ha TURNO)": "{:,.2f}",
+        "PESO": "{:,.2f}",
+        "CALIBRE": "{:,.2f}",
+        "ÁREA": "{:,.2f}",
     }),
     use_container_width=True
 )
 
 # --------------------------
-# SCATTER: X vs MÉTRICA por campaña (un solo gráfico)
+# SCATTER
 # --------------------------
-st.subheader("Dispersión (X vs métrica) por campaña")
+st.subheader("Dispersión")
 
 left, right = st.columns([0.28, 0.72])
 
@@ -561,27 +535,29 @@ with right:
 
         if y_col == "KG/HA":
             y_mode = "ratio_kg_area_turno"
-            y_title = "KG/HA (KG total / Ha TURNO única)"
+            y_title = "KG/HA"
         elif y_col == "KG/PLANTA":
             y_mode = "ratio_kg_planta_turno"
-            y_title = "KG/PLANTA (KG total / SUMA(Ha TURNO única × DENSIDAD única))"
+            y_title = "KG/PLANTA"
         else:
             y_mode = "weighted"
-            y_title = f"{y_label} (ponderado)"
+            y_title = y_label
 
         if x_col == "KG/HA":
             x_mode = "ratio_kg_area_turno"
+        elif x_col in SUM_X_COLS:
+            x_mode = "sum"
+        elif x_col in [
+            "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+            "EDAD PLANTA", "SEMANA DE SIEMBRA",
+            "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+            "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+            "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+            "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
+        ]:
+            x_mode = "simple"
         else:
-            x_mode = "simple" if x_col in [
-                "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
-                "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
-                "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-                "EDAD PLANTA", "SEMANA DE SIEMBRA",
-                "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
-                "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
-                "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
-                "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
-            ] else "weighted"
+            x_mode = "weighted"
 
         agg_sc = aggregate_level(dff, level, y_col, mode=y_mode).rename(columns={"y_val": "Y_val"})
         tmpx = aggregate_level(dff, level, x_col, mode=x_mode)[level + ["y_val"]].rename(columns={"y_val": "X_val"})
@@ -595,8 +571,8 @@ with right:
             x="X_val",
             y="Y_val",
             color="CAMPAÑA",
-            hover_data=["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "kg_sum", "area_turno_sum"],
-            title=f"{x_col} vs {y_label} | Nivel: unidad productiva"
+            hover_data=["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "kg_sum", "area_sum"],
+            title=f"{x_col} vs {y_label}"
         )
 
         y_range = compute_full_dynamic_axis_range(agg_sc["Y_val"], lower_zero=True)
@@ -615,9 +591,9 @@ with right:
 st.divider()
 
 # --------------------------
-# CURVA SEMANAL: KG/HA promedio simple
+# CURVA SEMANAL
 # --------------------------
-st.subheader("Curva semanal de KG/HA (comparación por campaña)")
+st.subheader("Curva semanal")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
@@ -627,50 +603,50 @@ else:
         rows.append({
             "CAMPAÑA": str(camp),
             "SEMANA": int(sem),
-            "KG/HA_simple": simple_mean(g["KG/HA"]),
+            "KG/HA": simple_mean(g["KG/HA"]),
         })
     wk = pd.DataFrame(rows)
 
     start_week = compute_campaign_axis_start_week(dff)
-    wk["SEMANA_EJE"] = np.where(wk["SEMANA"] < start_week, wk["SEMANA"] + 52, wk["SEMANA"]).astype(int)
-    wk = wk.sort_values(["CAMPAÑA", "SEMANA_EJE"])
+    wk["SEM_EJE"] = np.where(wk["SEMANA"] < start_week, wk["SEMANA"] + 52, wk["SEMANA"]).astype(int)
+    wk = wk.sort_values(["CAMPAÑA", "SEM_EJE"])
 
-    max_eje = int(wk["SEMANA_EJE"].max())
+    max_eje = int(wk["SEM_EJE"].max())
     tickvals = list(range(start_week, 53))
     if max_eje >= 53:
         tickvals += list(range(53, max_eje + 1))
     ticktext = [str(v) if v <= 52 else str(v - 52) for v in tickvals]
 
     fig_wk = px.line(
-        wk, x="SEMANA_EJE", y="KG/HA_simple", color="CAMPAÑA",
+        wk, x="SEM_EJE", y="KG/HA", color="CAMPAÑA",
         markers=True,
-        title=f"Promedio KG/HA por semana (promedio simple) | Eje continuo desde semana {start_week}"
+        title="KG/HA por semana"
     )
     fig_wk.update_layout(
         xaxis=dict(
-            title="SEMANA (orden real por campaña)",
+            title="SEMANA",
             tickmode="array",
             tickvals=tickvals,
             ticktext=ticktext,
         ),
-        yaxis=dict(title="KG/HA promedio simple"),
+        yaxis=dict(title="KG/HA"),
     )
     st.plotly_chart(fig_wk, use_container_width=True)
 
 st.divider()
 
 # --------------------------
-# BOXPLOTS: SIEMBRA FINAL y EDAD PLANTA FINAL
+# BOXPLOTS
 # --------------------------
-st.subheader("KG/HA: Boxplot por SIEMBRA FINAL y por EDAD PLANTA FINAL")
+st.subheader("Boxplots")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
     turn_level = UNIT_COLS_BASE + ["SIEMBRA FINAL", "EDAD PLANTA FINAL"]
 
-    agg_turn_kgha = aggregate_level(dff, turn_level, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG/HA_turno"})
-    agg_turn_kgha = agg_turn_kgha.dropna(subset=["KG/HA_turno"])
+    agg_turn_kgha = aggregate_level(dff, turn_level, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG_HA"})
+    agg_turn_kgha = agg_turn_kgha.dropna(subset=["KG_HA"])
 
     b1, b2 = st.columns(2)
 
@@ -678,12 +654,12 @@ else:
         fig_siem = px.box(
             agg_turn_kgha,
             x="SIEMBRA FINAL",
-            y="KG/HA_turno",
+            y="KG_HA",
             points="outliers",
-            title="KG/HA por SIEMBRA FINAL (KG total / Ha TURNO única)"
+            title="KG/HA por SIEMBRA"
         )
         fig_siem.update_layout(
-            xaxis=dict(type="category"),
+            xaxis=dict(type="category", title="SIEMBRA"),
             yaxis=dict(title="KG/HA")
         )
         st.plotly_chart(fig_siem, use_container_width=True)
@@ -694,43 +670,44 @@ else:
         fig_age = px.box(
             agg_turn_kgha,
             x="EDAD PLANTA FINAL",
-            y="KG/HA_turno",
+            y="KG_HA",
             category_orders={"EDAD PLANTA FINAL": order_age},
             points="outliers",
-            title="KG/HA por EDAD PLANTA FINAL (KG total / Ha TURNO única)"
+            title="KG/HA por EDAD"
         )
         fig_age.update_layout(
-            xaxis=dict(type="category"),
+            xaxis=dict(type="category", title="EDAD"),
             yaxis=dict(title="KG/HA")
         )
         st.plotly_chart(fig_age, use_container_width=True)
 
     st.divider()
 
-    st.subheader("PESO BAYA (g): Boxplot por SIEMBRA FINAL")
-    agg_turn_peso = aggregate_level(dff, turn_level, "PESO BAYA (g)", mode="weighted_kg").rename(columns={"y_val": "PESO_BAYA_pond_kg"})
-    agg_turn_peso = agg_turn_peso.dropna(subset=["PESO_BAYA_pond_kg"])
+    st.subheader("PESO BAYA")
+
+    agg_turn_peso = aggregate_level(dff, turn_level, "PESO BAYA (g)", mode="weighted_kg").rename(columns={"y_val": "PESO"})
+    agg_turn_peso = agg_turn_peso.dropna(subset=["PESO"])
 
     fig_peso_siem = px.box(
         agg_turn_peso,
         x="SIEMBRA FINAL",
-        y="PESO_BAYA_pond_kg",
+        y="PESO",
         points="outliers",
-        title="PESO BAYA (g) ponderado por kilogramos por SIEMBRA FINAL (boxplot)"
+        title="PESO por SIEMBRA"
     )
     fig_peso_siem.update_layout(
-        xaxis=dict(type="category"),
-        yaxis=dict(title="PESO BAYA (g) ponderado por kg")
+        xaxis=dict(type="category", title="SIEMBRA"),
+        yaxis=dict(title="PESO")
     )
     st.plotly_chart(fig_peso_siem, use_container_width=True)
 
     st.divider()
 
-    st.subheader("Diferencias biométricas entre SIEMBRA FINAL")
-    st.caption("Compara SUELO vs MACETA para una variable biométrica a elección.")
+    st.subheader("Biometría")
+    st.caption("Compara SUELO vs MACETA para una variable biométrica.")
 
     biom_col_pick = st.selectbox(
-        "Selecciona variable biométrica",
+        "Variable biométrica",
         BIOMETRIC_COLS,
         index=BIOMETRIC_COLS.index("ALTURA_PLANTA_ULT") if "ALTURA_PLANTA_ULT" in BIOMETRIC_COLS else 0
     )
@@ -745,17 +722,17 @@ else:
         bio_df = bio_df.dropna(subset=[biom_col_pick])
 
         if bio_df.empty:
-            st.info("No hay datos suficientes para la vista biométrica con los filtros actuales.")
+            st.info("No hay datos suficientes.")
         else:
             fig_bio = px.box(
                 bio_df,
                 x="SIEMBRA FINAL",
                 y=biom_col_pick,
                 points="outliers",
-                title=f"{biom_col_pick} por SIEMBRA FINAL"
+                title=f"{biom_col_pick} por SIEMBRA"
             )
             fig_bio.update_layout(
-                xaxis=dict(type="category"),
+                xaxis=dict(type="category", title="SIEMBRA"),
                 yaxis=dict(title=biom_col_pick)
             )
             st.plotly_chart(fig_bio, use_container_width=True)
@@ -763,7 +740,7 @@ else:
     with bio_right:
         bio_summary = build_siembra_final_biometric_summary(dff, biom_col_pick)
         if bio_summary.empty:
-            st.info("No hay resumen disponible.")
+            st.info("No hay resumen.")
         else:
             st.dataframe(
                 bio_summary.style.format({
@@ -772,7 +749,7 @@ else:
                     "DESV_STD": "{:,.2f}",
                     "MIN": "{:,.2f}",
                     "MAX": "{:,.2f}",
-                    "DELTA_SUELO_MENOS_MACETA": "{:,.2f}",
+                    "DELTA": "{:,.2f}",
                 }),
                 use_container_width=True
             )
@@ -780,9 +757,9 @@ else:
 st.divider()
 
 # --------------------------
-# KG/PLANTA con fórmula
+# KG/PLANTA
 # --------------------------
-st.subheader("KG/PLANTA calculado vs campañas")
+st.subheader("KG/PLANTA")
 
 kgp = compute_kg_planta_campaign(dff)
 if kgp.empty:
@@ -791,27 +768,30 @@ else:
     fig_kp = px.line(
         kgp,
         x="CAMPAÑA",
-        y="KG/PLANTA_calc",
+        y="KG/PLANTA",
         markers=True,
-        title="KG/PLANTA calculado vs CAMPAÑA | Fórmula: KG total / SUMA(Ha TURNO única × DENSIDAD única)"
+        title="KG/PLANTA por campaña"
     )
-    fig_kp.update_layout(xaxis=dict(type="category"), yaxis=dict(title="KG/PLANTA_calc"))
+    fig_kp.update_layout(
+        xaxis=dict(type="category", title="CAMPAÑA"),
+        yaxis=dict(title="KG/PLANTA")
+    )
     st.plotly_chart(fig_kp, use_container_width=True)
 
 st.divider()
 
 # --------------------------
-# VARIEDADES: ranking + heatmap VS campañas
+# VARIEDADES
 # --------------------------
-st.subheader("Variedades: ranking (KG/HA) + VS por campañas")
+st.subheader("Variedades")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    top_n = st.slider("Top N variedades (por frecuencia)", 5, 25, 10)
+    top_n = st.slider("Top N variedades", 5, 25, 10)
 
     level_var = ["VARIEDAD", "CAMPAÑA"]
-    agg_v = aggregate_level(dff, level_var, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG/HA_turno"})
+    agg_v = aggregate_level(dff, level_var, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG_HA"})
     agg_v["CAMPAÑA"] = agg_v["CAMPAÑA"].astype(str)
 
     freq = (
@@ -824,22 +804,22 @@ else:
 
     rows = []
     for var, g in dff.groupby("VARIEDAD", dropna=False):
-        rows.append({"VARIEDAD": var, "KG/HA_turno": ratio_kg_over_unique_turno_area(g)})
+        rows.append({"VARIEDAD": var, "KG_HA": ratio_kg_over_unique_turno_area(g)})
     avg_var = pd.DataFrame(rows).merge(freq, on="VARIEDAD", how="left").fillna({"n": 0})
     avg_var = avg_var.sort_values("n", ascending=False).head(top_n)
 
     fig_rank = px.bar(
-        avg_var.sort_values("KG/HA_turno", ascending=True),
-        x="KG/HA_turno", y="VARIEDAD",
+        avg_var.sort_values("KG_HA", ascending=True),
+        x="KG_HA", y="VARIEDAD",
         orientation="h",
-        title="Promedio KG/HA (Top variedades por frecuencia) | KG total / Ha TURNO única"
+        title="Ranking KG/HA"
     )
-    fig_rank.update_layout(xaxis=dict(title="KG/HA"))
+    fig_rank.update_layout(xaxis=dict(title="KG/HA"), yaxis=dict(title="VARIEDAD"))
     st.plotly_chart(fig_rank, use_container_width=True)
 
     top_vars = avg_var["VARIEDAD"].tolist()
     hm = agg_v[agg_v["VARIEDAD"].isin(top_vars)].copy()
-    pivot = hm.pivot_table(index="VARIEDAD", columns="CAMPAÑA", values="KG/HA_turno", aggfunc="mean")
+    pivot = hm.pivot_table(index="VARIEDAD", columns="CAMPAÑA", values="KG_HA", aggfunc="mean")
     pivot = pivot.reindex(index=top_vars)
 
     fig_hm = go.Figure(
@@ -847,23 +827,24 @@ else:
             z=pivot.values,
             x=[str(c) for c in pivot.columns],
             y=pivot.index.tolist(),
-            colorbar=dict(title="avg KG/HA"),
+            colorbar=dict(title="KG/HA"),
         )
     )
     fig_hm.update_layout(
-        title="VS: VARIEDAD x CAMPAÑA (KG/HA = KG total / Ha TURNO única)",
+        title="VARIEDAD x CAMPAÑA",
         height=420,
         margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(type="category")
+        xaxis=dict(type="category", title="CAMPAÑA"),
+        yaxis=dict(title="VARIEDAD")
     )
     st.plotly_chart(fig_hm, use_container_width=True)
 
 st.divider()
 
 # --------------------------
-# KG/HA por EDAD y CAMPAÑA
+# KG/HA por EDAD
 # --------------------------
-st.subheader("KG/HA por edad y campaña")
+st.subheader("KG/HA por edad")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
@@ -873,7 +854,7 @@ else:
         rows.append({
             "CAMPAÑA": str(camp),
             "EDAD PLANTA FINAL": str(edad),
-            "KG/HA_turno": ratio_kg_over_unique_turno_area(g)
+            "KG_HA": ratio_kg_over_unique_turno_area(g)
         })
 
     age_camp = pd.DataFrame(rows)
@@ -886,14 +867,14 @@ else:
     fig_agecamp = px.bar(
         age_camp,
         x="CAMPAÑA",
-        y="KG/HA_turno",
+        y="KG_HA",
         color="EDAD PLANTA FINAL",
         barmode="group",
         category_orders={"CAMPAÑA": campaign_order, "EDAD PLANTA FINAL": order_age},
-        title="KG/HA por EDAD PLANTA FINAL y CAMPAÑA | KG total / Ha TURNO única"
+        title="KG/HA por edad y campaña"
     )
     fig_agecamp.update_layout(
-        xaxis=dict(type="category", categoryorder="array", categoryarray=campaign_order),
+        xaxis=dict(type="category", categoryorder="array", categoryarray=campaign_order, title="CAMPAÑA"),
         yaxis=dict(title="KG/HA")
     )
     st.plotly_chart(fig_agecamp, use_container_width=True)
@@ -903,6 +884,6 @@ st.divider()
 # --------------------------
 # CORRELACIONES
 # --------------------------
-st.subheader("Mapa de correlaciones (solo columnas seleccionadas)")
+st.subheader("Correlaciones")
 fig_corr = corr_heatmap(dff)
 st.plotly_chart(fig_corr, use_container_width=True)
