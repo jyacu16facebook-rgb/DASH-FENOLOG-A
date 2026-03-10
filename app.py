@@ -7,7 +7,7 @@
 #   * KG = SUMA(kilogramos)  (sin ponderar)
 #   * KG/HA resumen campaña = SUMA(kilogramos) / SUMA(Ha COSECHADA)
 #   * Scatter:
-#       - si Y = KG/HA => promedio simple por unidad
+#       - si Y = KG/HA => ratio KG total / área ejecutada por unidad
 #       - si Y = PESO / CALIBRE => ponderado por Ha COSECHADA
 #   * Área ejecutada = SUMA(Ha COSECHADA)
 # - Boxplots:
@@ -182,11 +182,13 @@ def apply_filters(df: pd.DataFrame,
 
 def _sort_campaign_categories(campaign_series: pd.Series):
     uniq = campaign_series.dropna().astype(str).unique().tolist()
+
     def to_int_or_big(x):
         try:
             return int(str(x).strip())
         except Exception:
             return 10**9
+
     uniq_sorted = sorted(uniq, key=lambda x: (to_int_or_big(x), str(x)))
     return uniq_sorted
 
@@ -411,6 +413,57 @@ def build_siembra_final_biometric_summary(dff: pd.DataFrame, metric_col: str) ->
     summary["DELTA_SUELO_MENOS_MACETA"] = delta
     return summary
 
+def compute_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
+    """
+    Rango dinámico robusto para el eje Y del scatter.
+    Usa percentiles para evitar que pocos outliers aplasten visualmente la nube principal.
+    """
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return None
+
+    if len(s) == 1:
+        val = float(s.iloc[0])
+        pad = max(abs(val) * 0.10, 1)
+        low = 0 if lower_zero and val >= 0 else val - pad
+        high = val + pad
+        if high <= low:
+            high = low + 1
+        return [low, high]
+
+    q01 = float(s.quantile(0.01))
+    q99 = float(s.quantile(0.99))
+    real_min = float(s.min())
+    real_max = float(s.max())
+
+    # Si no hay una diferencia muy fuerte, usa todo el rango real
+    if real_max <= (q99 * 1.25 if q99 > 0 else real_max):
+        low = real_min
+        high = real_max
+    else:
+        low = q01
+        high = q99
+
+    if pd.isna(low) or pd.isna(high):
+        return None
+
+    if low == high:
+        pad = max(abs(high) * 0.10, 1)
+        low -= pad
+        high += pad
+    else:
+        pad = (high - low) * 0.08
+        low -= pad
+        high += pad
+
+    if lower_zero and high > 0:
+        low = max(0, low)
+
+    if high <= low:
+        high = low + 1
+
+    return [low, high]
+
 # --------------------------
 # HELPERS: INDICE DE VIGOR
 # --------------------------
@@ -430,7 +483,6 @@ def build_vigor_unit_table(df_full: pd.DataFrame, dff_filtered: pd.DataFrame) ->
     if dff_filtered.empty:
         return pd.DataFrame()
 
-        # Base filtrada a nivel unidad productiva
     agg_dict = {col: (col, first_valid) for col in VIGOR_VARS if col in dff_filtered.columns}
     agg_dict.update({
         "EDAD PLANTA FINAL": ("EDAD PLANTA FINAL", first_valid),
@@ -634,47 +686,44 @@ with right:
         if x_col == "KG/HA":
             x_mode = "ratio_kg_area"
         else:
-            x_mode = "simple" if x_col in ["FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
-                                           "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
-                                           "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-                                           "EDAD PLANTA", "SEMANA DE SIEMBRA",
-                                           "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
-                                           "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
-                                           "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
-                                           "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"] else "weighted"
+            x_mode = "simple" if x_col in [
+                "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+                "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
+                "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
+                "EDAD PLANTA", "SEMANA DE SIEMBRA",
+                "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+                "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+                "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+                "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
+            ] else "weighted"
 
         agg_sc = aggregate_level(dff, level, y_col, mode=y_mode).rename(columns={"y_val": "Y_val"})
         tmpx = aggregate_level(dff, level, x_col, mode=x_mode)[level + ["y_val"]].rename(columns={"y_val": "X_val"})
         agg_sc = agg_sc.merge(tmpx, on=level, how="left")
 
         agg_sc["CAMPAÑA"] = agg_sc["CAMPAÑA"].astype(str)
-        agg_sc["POINT"] = "NORMAL"
-
-        if not agg_sc.empty and agg_sc["Y_val"].notna().any():
-            for camp, g in agg_sc.groupby("CAMPAÑA", dropna=False):
-                g2 = g.dropna(subset=["Y_val"])
-                if g2.empty:
-                    continue
-                idx_best = g2["Y_val"].idxmax()
-                idx_worst = g2["Y_val"].idxmin()
-                agg_sc.loc[idx_best, "POINT"] = "BEST"
-                agg_sc.loc[idx_worst, "POINT"] = "WORST"
+        agg_sc = agg_sc.dropna(subset=["X_val", "Y_val"]).copy()
 
         fig_sc = px.scatter(
             agg_sc,
             x="X_val",
             y="Y_val",
             color="CAMPAÑA",
-            symbol="POINT",
-            hover_data=["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum", "POINT"],
+            hover_data=["CAMPAÑA", "ETAPA", "CAMPO", "TURNO", "VARIEDAD", "w_sum", "kg_sum"],
             title=f"{x_col} vs {y_label} | Nivel: unidad productiva"
         )
+
+        y_range = compute_dynamic_axis_range(agg_sc["Y_val"], lower_zero=True)
 
         fig_sc.update_layout(
             xaxis_title=x_col,
             yaxis_title=y_title,
             legend_title="CAMPAÑA",
         )
+
+        if y_range is not None:
+            fig_sc.update_yaxes(range=y_range)
+
         st.plotly_chart(fig_sc, use_container_width=True)
 
 st.divider()
