@@ -551,13 +551,9 @@ def render_variance_metrics(result: dict):
     with c5:
         card("Grupos", f"{int(result.get('grupos', 0))}")
 
-    normalidad_txt = "Sí" if result.get("normalidad_ok", False) else "No"
-    homoc_txt = "Sí" if result.get("homocedasticidad_ok", False) else "No"
-    st.caption(f"Supuestos evaluados para ANOVA → Normalidad: {normalidad_txt} | Homogeneidad de varianzas: {homoc_txt}")
-
 def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
     if df_plot.empty or group_col not in df_plot.columns or value_col not in df_plot.columns:
-        return pd.DataFrame(columns=["GRUPO", "N", "MEDIA", "MEDIANA", "DESV_STD"])
+        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD"])
 
     tmp = df_plot[[group_col, value_col]].copy()
     tmp[group_col] = tmp[group_col].astype(str).str.strip()
@@ -566,16 +562,14 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
     tmp = tmp.dropna(subset=[group_col, value_col]).copy()
 
     if tmp.empty:
-        return pd.DataFrame(columns=["GRUPO", "N", "MEDIA", "MEDIANA", "DESV_STD"])
+        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD"])
 
     desc = (
         tmp.groupby(group_col, dropna=False)[value_col]
-        .agg(["count", "mean", "median", "std"])
+        .agg(["median", "std"])
         .reset_index()
         .rename(columns={
             group_col: "GRUPO",
-            "count": "N",
-            "mean": "MEDIA",
             "median": "MEDIANA",
             "std": "DESV_STD"
         })
@@ -592,8 +586,6 @@ def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, valu
 
     st.dataframe(
         desc.style.format({
-            "N": "{:,.0f}",
-            "MEDIA": "{:,.4f}",
             "MEDIANA": "{:,.4f}",
             "DESV_STD": "{:,.4f}",
         }),
