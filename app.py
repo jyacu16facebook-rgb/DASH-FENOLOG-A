@@ -783,8 +783,6 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
     fig = go.Figure()
 
     color_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
-    offset_map = {"MAX": -0.18, "MIN": 0.18}
-    width_bar = 0.32
 
     for tipo in ["MAX", "MIN"]:
         d = df_plot[df_plot["TIPO"] == tipo].copy()
@@ -796,10 +794,10 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
         text_vals = []
 
         for _, r in d.iterrows():
-            camp = r["CAMPAÑA"]
             if pd.isna(r.get(metric_name, np.nan)):
                 continue
 
+            camp = r["CAMPAÑA"]
             if level_mode == "TURNO":
                 label_entidad = f"{r['TURNO']} ({r['CAMPO']})"
             else:
@@ -815,7 +813,7 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
             y=y_vals,
             name=f"{metric_name} {tipo}",
             yaxis="y1",
-            width=width_bar,
+            width=0.25,
             offsetgroup=tipo,
             marker_color=color_map[tipo],
             text=text_vals,
@@ -826,29 +824,11 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
                 "Campaña: %{x}<br>"
                 "Tipo: %{customdata[1]}<br>"
                 f"{level_mode}: " + "%{customdata[0]}<br>"
-                f"{metric_name}: %{y:,.2f}<extra></extra>"
+                f"{metric_name}: %{{y:,.2f}}<extra></extra>"
             )
         ))
 
-    for i, comp_var in enumerate(comp_vars):
-        line_x = []
-        line_y = []
-        line_text = []
-
-        for camp in campaign_order:
-            for tipo in ["MAX", "MIN"]:
-                row = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == tipo)]
-                if row.empty:
-                    continue
-                row = row.iloc[0]
-
-                x_label = f"{camp} | {tipo}"
-                line_x.append(x_label)
-                line_y.append(row.get(comp_var, np.nan))
-                line_text.append("NA" if pd.isna(row.get(comp_var, np.nan)) else f"{row.get(comp_var):,.0f}")
-
-        # usamos eje oculto auxiliar categórico, pero como plotly no mezcla fácil,
-        # armamos las líneas sobre las campañas repitiendo puntos con pequeños desplazamientos visuales.
+    for comp_var in comp_vars:
         x_vals = []
         y_vals = []
         text_vals = []
@@ -859,6 +839,7 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
                 if row.empty:
                     continue
                 row = row.iloc[0]
+
                 x_vals.append(camp)
                 y_vals.append(row.get(comp_var, np.nan))
                 text_vals.append("NA" if pd.isna(row.get(comp_var, np.nan)) else f"{row.get(comp_var):,.0f}")
