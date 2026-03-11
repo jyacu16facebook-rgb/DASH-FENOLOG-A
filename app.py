@@ -555,6 +555,51 @@ def render_variance_metrics(result: dict):
     homoc_txt = "Sí" if result.get("homocedasticidad_ok", False) else "No"
     st.caption(f"Supuestos evaluados para ANOVA → Normalidad: {normalidad_txt} | Homogeneidad de varianzas: {homoc_txt}")
 
+def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
+    if df_plot.empty or group_col not in df_plot.columns or value_col not in df_plot.columns:
+        return pd.DataFrame(columns=["GRUPO", "N", "MEDIA", "MEDIANA", "DESV_STD"])
+
+    tmp = df_plot[[group_col, value_col]].copy()
+    tmp[group_col] = tmp[group_col].astype(str).str.strip()
+    tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
+    tmp = tmp.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
+    tmp = tmp.dropna(subset=[group_col, value_col]).copy()
+
+    if tmp.empty:
+        return pd.DataFrame(columns=["GRUPO", "N", "MEDIA", "MEDIANA", "DESV_STD"])
+
+    desc = (
+        tmp.groupby(group_col, dropna=False)[value_col]
+        .agg(["count", "mean", "median", "std"])
+        .reset_index()
+        .rename(columns={
+            group_col: "GRUPO",
+            "count": "N",
+            "mean": "MEDIA",
+            "median": "MEDIANA",
+            "std": "DESV_STD"
+        })
+    )
+
+    desc["DESV_STD"] = desc["DESV_STD"].fillna(0)
+    return desc
+
+def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str):
+    desc = build_group_descriptive_summary(df_plot, group_col, value_col)
+    if desc.empty:
+        st.info("No hay resumen descriptivo por grupo.")
+        return
+
+    st.dataframe(
+        desc.style.format({
+            "N": "{:,.0f}",
+            "MEDIA": "{:,.4f}",
+            "MEDIANA": "{:,.4f}",
+            "DESV_STD": "{:,.4f}",
+        }),
+        use_container_width=True
+    )
+
 # --------------------------
 # UI: HEADER
 # --------------------------
@@ -825,6 +870,7 @@ else:
 
         anova_siem = analyze_variance_by_group(agg_turn_kgha, "SIEMBRA FINAL", "KG_HA")
         render_variance_metrics(anova_siem)
+        render_group_descriptive_summary(agg_turn_kgha, "SIEMBRA FINAL", "KG_HA")
 
     with b2:
         agg_turn_kgha["EDAD PLANTA FINAL"] = agg_turn_kgha["EDAD PLANTA FINAL"].astype(str)
@@ -845,6 +891,7 @@ else:
 
         anova_age = analyze_variance_by_group(agg_turn_kgha, "EDAD PLANTA FINAL", "KG_HA")
         render_variance_metrics(anova_age)
+        render_group_descriptive_summary(agg_turn_kgha, "EDAD PLANTA FINAL", "KG_HA")
 
     st.divider()
 
@@ -868,6 +915,7 @@ else:
 
     anova_peso = analyze_variance_by_group(agg_turn_peso, "SIEMBRA FINAL", "PESO")
     render_variance_metrics(anova_peso)
+    render_group_descriptive_summary(agg_turn_peso, "SIEMBRA FINAL", "PESO")
 
     st.divider()
 
@@ -916,6 +964,7 @@ else:
 
         anova_seg = analyze_variance_by_group(agg_turn_seg, "SEG DENSIDAD", "METRIC_VAL")
         render_variance_metrics(anova_seg)
+        render_group_descriptive_summary(agg_turn_seg, "SEG DENSIDAD", "METRIC_VAL")
 
     st.divider()
 
@@ -955,6 +1004,7 @@ else:
 
             anova_bio = analyze_variance_by_group(bio_df, "SIEMBRA FINAL", biom_col_pick)
             render_variance_metrics(anova_bio)
+            render_group_descriptive_summary(bio_df, "SIEMBRA FINAL", biom_col_pick)
 
     with bio_right:
         bio_summary = build_siembra_final_biometric_summary(dff, biom_col_pick)
