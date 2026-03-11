@@ -1,6 +1,6 @@
 # app.py
 # ==========================================================
-# DASH: Fenología y estructura vs rendimiento
+# DASH: Fenología vs rendimiento
 # ==========================================================
 
 import os
@@ -674,17 +674,15 @@ def build_entity_maxmin_summary(
     df_input: pd.DataFrame,
     level_mode: str,
     metric_name: str,
-    comp_var: str
+    comp_vars: list
 ):
     if df_input.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     if level_mode == "TURNO":
         level_cols = UNIT_COLS_BASE
-        entity_label = "TURNO"
     else:
         level_cols = ["CAMPAÑA", "FUNDO", "ETAPA", "CAMPO", "VARIEDAD"]
-        entity_label = "CAMPO"
 
     rows = []
 
@@ -699,16 +697,15 @@ def build_entity_maxmin_summary(
         else:
             metric_val = weighted_mean(g["PESO BAYA (g)"], g["kilogramos"])
 
-        if level_mode == "TURNO":
-            comp_val = comparative_value_turno(g, comp_var)
-        else:
-            comp_val = comparative_value_campo(g, comp_var)
+        for comp_var in comp_vars:
+            if level_mode == "TURNO":
+                rec[comp_var] = comparative_value_turno(g, comp_var)
+            else:
+                rec[comp_var] = comparative_value_campo(g, comp_var)
 
         rec["METRICA"] = metric_val
-        rec["COMP_VAL"] = comp_val
         rec["KG_TOTAL"] = sum_numeric(g["kilogramos"])
         rec["AREA_TURNO_UNICA"] = unique_turno_area_sum(g)
-        rec["ENTITY_LABEL"] = entity_label
         rows.append(rec)
 
     detail = pd.DataFrame(rows)
@@ -719,108 +716,180 @@ def build_entity_maxmin_summary(
     if detail.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    detail = detail.sort_values("METRICA", ascending=False).reset_index(drop=True)
-    row_max = detail.iloc[0].copy()
-    row_min = detail.iloc[-1].copy()
+    detail["CAMPAÑA"] = detail["CAMPAÑA"].astype(str)
+    summary_rows = []
 
-    if level_mode == "TURNO":
-        summary = pd.DataFrame([
-            {
-                "TIPO": "MAX",
-                "CAMPAÑA": row_max["CAMPAÑA"],
-                "FUNDO": row_max["FUNDO"],
-                "ETAPA": row_max["ETAPA"],
-                "CAMPO": row_max["CAMPO"],
-                "TURNO": row_max["TURNO"],
-                "VARIEDAD": row_max["VARIEDAD"],
-                metric_name: row_max["METRICA"],
-                comp_var: row_max["COMP_VAL"],
-                "KG_TOTAL": row_max["KG_TOTAL"],
-                "HA_TURNO_UNICA": row_max["AREA_TURNO_UNICA"],
-            },
-            {
-                "TIPO": "MIN",
-                "CAMPAÑA": row_min["CAMPAÑA"],
-                "FUNDO": row_min["FUNDO"],
-                "ETAPA": row_min["ETAPA"],
-                "CAMPO": row_min["CAMPO"],
-                "TURNO": row_min["TURNO"],
-                "VARIEDAD": row_min["VARIEDAD"],
-                metric_name: row_min["METRICA"],
-                comp_var: row_min["COMP_VAL"],
-                "KG_TOTAL": row_min["KG_TOTAL"],
-                "HA_TURNO_UNICA": row_min["AREA_TURNO_UNICA"],
-            }
-        ])
-    else:
-        summary = pd.DataFrame([
-            {
-                "TIPO": "MAX",
-                "CAMPAÑA": row_max["CAMPAÑA"],
-                "FUNDO": row_max["FUNDO"],
-                "ETAPA": row_max["ETAPA"],
-                "CAMPO": row_max["CAMPO"],
-                "VARIEDAD": row_max["VARIEDAD"],
-                metric_name: row_max["METRICA"],
-                comp_var: row_max["COMP_VAL"],
-                "KG_TOTAL": row_max["KG_TOTAL"],
-                "HA_TURNO_UNICA": row_max["AREA_TURNO_UNICA"],
-            },
-            {
-                "TIPO": "MIN",
-                "CAMPAÑA": row_min["CAMPAÑA"],
-                "FUNDO": row_min["FUNDO"],
-                "ETAPA": row_min["ETAPA"],
-                "CAMPO": row_min["CAMPO"],
-                "VARIEDAD": row_min["VARIEDAD"],
-                metric_name: row_min["METRICA"],
-                comp_var: row_min["COMP_VAL"],
-                "KG_TOTAL": row_min["KG_TOTAL"],
-                "HA_TURNO_UNICA": row_min["AREA_TURNO_UNICA"],
-            }
-        ])
+    for camp, gcamp in detail.groupby("CAMPAÑA", dropna=False):
+        gcamp = gcamp.sort_values("METRICA", ascending=False).reset_index(drop=True)
+        row_max = gcamp.iloc[0].copy()
+        row_min = gcamp.iloc[-1].copy()
+
+        if level_mode == "TURNO":
+            for tipo, row in [("MAX", row_max), ("MIN", row_min)]:
+                rec = {
+                    "TIPO": tipo,
+                    "CAMPAÑA": row["CAMPAÑA"],
+                    "FUNDO": row["FUNDO"],
+                    "ETAPA": row["ETAPA"],
+                    "CAMPO": row["CAMPO"],
+                    "TURNO": row["TURNO"],
+                    "VARIEDAD": row["VARIEDAD"],
+                    metric_name: row["METRICA"],
+                    "KG_TOTAL": row["KG_TOTAL"],
+                    "HA_TURNO_UNICA": row["AREA_TURNO_UNICA"],
+                }
+                for comp_var in comp_vars:
+                    rec[comp_var] = row.get(comp_var, np.nan)
+                summary_rows.append(rec)
+        else:
+            for tipo, row in [("MAX", row_max), ("MIN", row_min)]:
+                rec = {
+                    "TIPO": tipo,
+                    "CAMPAÑA": row["CAMPAÑA"],
+                    "FUNDO": row["FUNDO"],
+                    "ETAPA": row["ETAPA"],
+                    "CAMPO": row["CAMPO"],
+                    "VARIEDAD": row["VARIEDAD"],
+                    metric_name: row["METRICA"],
+                    "KG_TOTAL": row["KG_TOTAL"],
+                    "HA_TURNO_UNICA": row["AREA_TURNO_UNICA"],
+                }
+                for comp_var in comp_vars:
+                    rec[comp_var] = row.get(comp_var, np.nan)
+                summary_rows.append(rec)
+
+    summary = pd.DataFrame(summary_rows)
+    if summary.empty:
+        return pd.DataFrame(), detail
+
+    summary["CAMPAÑA"] = pd.Categorical(
+        summary["CAMPAÑA"].astype(str),
+        categories=_sort_campaign_categories(summary["CAMPAÑA"].astype(str)),
+        ordered=True
+    )
+    summary = summary.sort_values(["CAMPAÑA", "TIPO"]).reset_index(drop=True)
 
     return summary, detail
 
-def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_var: str, level_mode: str):
+def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: list, level_mode: str):
     if summary_df.empty:
         st.info("No hay datos suficientes para mostrar la comparación MAX/MIN.")
         return
 
-    x_vals = summary_df["TIPO"].tolist()
-    metric_vals = summary_df[metric_name].tolist()
-    comp_vals = summary_df[comp_var].tolist()
+    df_plot = summary_df.copy()
+    df_plot["CAMPAÑA"] = df_plot["CAMPAÑA"].astype(str)
 
-    labels = []
-    if level_mode == "TURNO":
-        for _, r in summary_df.iterrows():
-            labels.append(f"{r['TIPO']} | {r['TURNO']} ({r['CAMPO']})")
-    else:
-        for _, r in summary_df.iterrows():
-            labels.append(f"{r['TIPO']} | {r['CAMPO']}")
-
+    campaign_order = _sort_campaign_categories(df_plot["CAMPAÑA"])
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=labels,
-        y=metric_vals,
-        name=metric_name,
-        yaxis="y1"
-    ))
-    fig.add_trace(go.Scatter(
-        x=labels,
-        y=comp_vals,
-        mode="lines+markers",
-        name=comp_var,
-        yaxis="y2"
-    ))
+
+    color_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
+    offset_map = {"MAX": -0.18, "MIN": 0.18}
+    width_bar = 0.32
+
+    for tipo in ["MAX", "MIN"]:
+        d = df_plot[df_plot["TIPO"] == tipo].copy()
+        d = d.set_index("CAMPAÑA").reindex(campaign_order).reset_index()
+
+        customdata = []
+        x_vals = []
+        y_vals = []
+        text_vals = []
+
+        for _, r in d.iterrows():
+            camp = r["CAMPAÑA"]
+            if pd.isna(r.get(metric_name, np.nan)):
+                continue
+
+            if level_mode == "TURNO":
+                label_entidad = f"{r['TURNO']} ({r['CAMPO']})"
+            else:
+                label_entidad = f"{r['CAMPO']}"
+
+            x_vals.append(camp)
+            y_vals.append(r[metric_name])
+            text_vals.append(f"{r[metric_name]:,.0f}")
+            customdata.append([label_entidad, tipo])
+
+        fig.add_trace(go.Bar(
+            x=x_vals,
+            y=y_vals,
+            name=f"{metric_name} {tipo}",
+            yaxis="y1",
+            width=width_bar,
+            offsetgroup=tipo,
+            marker_color=color_map[tipo],
+            text=text_vals,
+            textposition="outside",
+            textfont=dict(size=11),
+            customdata=customdata,
+            hovertemplate=(
+                "Campaña: %{x}<br>"
+                "Tipo: %{customdata[1]}<br>"
+                f"{level_mode}: " + "%{customdata[0]}<br>"
+                f"{metric_name}: %{y:,.2f}<extra></extra>"
+            )
+        ))
+
+    for i, comp_var in enumerate(comp_vars):
+        line_x = []
+        line_y = []
+        line_text = []
+
+        for camp in campaign_order:
+            for tipo in ["MAX", "MIN"]:
+                row = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == tipo)]
+                if row.empty:
+                    continue
+                row = row.iloc[0]
+
+                x_label = f"{camp} | {tipo}"
+                line_x.append(x_label)
+                line_y.append(row.get(comp_var, np.nan))
+                line_text.append("NA" if pd.isna(row.get(comp_var, np.nan)) else f"{row.get(comp_var):,.0f}")
+
+        # usamos eje oculto auxiliar categórico, pero como plotly no mezcla fácil,
+        # armamos las líneas sobre las campañas repitiendo puntos con pequeños desplazamientos visuales.
+        x_vals = []
+        y_vals = []
+        text_vals = []
+
+        for camp in campaign_order:
+            for tipo in ["MAX", "MIN"]:
+                row = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == tipo)]
+                if row.empty:
+                    continue
+                row = row.iloc[0]
+                x_vals.append(camp)
+                y_vals.append(row.get(comp_var, np.nan))
+                text_vals.append("NA" if pd.isna(row.get(comp_var, np.nan)) else f"{row.get(comp_var):,.0f}")
+
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode="lines+markers+text",
+            name=comp_var,
+            yaxis="y2",
+            text=text_vals,
+            textposition="top center",
+            textfont=dict(size=10),
+            connectgaps=False
+        ))
 
     fig.update_layout(
-        title=f"MAX vs MIN de {metric_name} por {level_mode} + {comp_var}",
-        xaxis=dict(type="category"),
+        title=f"MAX vs MIN de {metric_name} por {level_mode} + {', '.join(comp_vars)}",
+        xaxis=dict(
+            type="category",
+            title="CAMPAÑA",
+            categoryorder="array",
+            categoryarray=campaign_order
+        ),
         yaxis=dict(title=metric_name),
-        yaxis2=dict(title=comp_var, overlaying="y", side="right"),
+        yaxis2=dict(title="Variables comparativas", overlaying="y", side="right"),
         legend=dict(orientation="h"),
-        height=520
+        height=580,
+        margin=dict(t=80, b=60),
+        bargap=0.55,
+        bargroupgap=0.15
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1378,7 +1447,7 @@ st.divider()
 # NUEVA VISTA: MAX / MIN KG/HA
 # --------------------------
 st.subheader("MAX / MIN de KG/HA")
-st.caption("Identifica el máximo y mínimo de KG/HA según TURNO o CAMPO. El ranking se calcula como kilogramos / suma de Ha TURNO única.")
+st.caption("Identifica el máximo y mínimo de KG/HA según TURNO o CAMPO. Ahora la visualización se muestra por campaña.")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
@@ -1394,35 +1463,41 @@ else:
             key="level_mode_kgha"
         )
 
-        comp_var_kgha = st.selectbox(
+        default_comp_kgha = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates else comp_candidates[:1]
+        comp_vars_kgha = st.multiselect(
             "Variables comparativas",
             comp_candidates,
-            index=comp_candidates.index("ALTURA_PLANTA_ULT") if "ALTURA_PLANTA_ULT" in comp_candidates else 0,
-            key="comp_var_kgha"
+            default=default_comp_kgha,
+            key="comp_vars_kgha"
         )
 
     with kg_right:
-        summary_kgha, detail_kgha = build_entity_maxmin_summary(
-            dff,
-            level_mode=level_mode_kgha,
-            metric_name="KG/HA",
-            comp_var=comp_var_kgha
-        )
-
-        if summary_kgha.empty:
-            st.info("No hay datos suficientes para calcular MAX/MIN de KG/HA.")
+        if not comp_vars_kgha:
+            st.info("Selecciona al menos una variable comparativa.")
         else:
-            fmt_dict = {
-                "KG/HA": "{:,.4f}",
-                comp_var_kgha: "{:,.4f}",
-                "KG_TOTAL": "{:,.4f}",
-                "HA_TURNO_UNICA": "{:,.4f}",
-            }
-            st.dataframe(
-                summary_kgha.style.format(fmt_dict),
-                use_container_width=True
+            summary_kgha, detail_kgha = build_entity_maxmin_summary(
+                dff,
+                level_mode=level_mode_kgha,
+                metric_name="KG/HA",
+                comp_vars=comp_vars_kgha
             )
-            render_maxmin_chart(summary_kgha, "KG/HA", comp_var_kgha, level_mode_kgha)
+
+            if summary_kgha.empty:
+                st.info("No hay datos suficientes para calcular MAX/MIN de KG/HA.")
+            else:
+                fmt_dict = {
+                    "KG/HA": "{:,.4f}",
+                    "KG_TOTAL": "{:,.4f}",
+                    "HA_TURNO_UNICA": "{:,.4f}",
+                }
+                for comp_var in comp_vars_kgha:
+                    fmt_dict[comp_var] = "{:,.4f}"
+
+                st.dataframe(
+                    summary_kgha.style.format(fmt_dict),
+                    use_container_width=True
+                )
+                render_maxmin_chart(summary_kgha, "KG/HA", comp_vars_kgha, level_mode_kgha)
 
 st.divider()
 
@@ -1430,7 +1505,7 @@ st.divider()
 # NUEVA VISTA: MAX / MIN PESO
 # --------------------------
 st.subheader("MAX / MIN de PESO")
-st.caption("Identifica el máximo y mínimo de PESO según TURNO o CAMPO. El ranking se calcula como promedio ponderado por kilogramos.")
+st.caption("Identifica el máximo y mínimo de PESO según TURNO o CAMPO. Esta vista mantiene la misma lógica completa que la de KG/HA y se muestra por campaña.")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
@@ -1446,35 +1521,41 @@ else:
             key="level_mode_peso"
         )
 
-        comp_var_peso = st.selectbox(
+        default_comp_peso = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_peso else comp_candidates_peso[:1]
+        comp_vars_peso = st.multiselect(
             "Variables comparativas ",
             comp_candidates_peso,
-            index=comp_candidates_peso.index("ALTURA_PLANTA_ULT") if "ALTURA_PLANTA_ULT" in comp_candidates_peso else 0,
-            key="comp_var_peso"
+            default=default_comp_peso,
+            key="comp_vars_peso"
         )
 
     with pe_right:
-        summary_peso, detail_peso = build_entity_maxmin_summary(
-            dff,
-            level_mode=level_mode_peso,
-            metric_name="PESO",
-            comp_var=comp_var_peso
-        )
-
-        if summary_peso.empty:
-            st.info("No hay datos suficientes para calcular MAX/MIN de PESO.")
+        if not comp_vars_peso:
+            st.info("Selecciona al menos una variable comparativa.")
         else:
-            fmt_dict = {
-                "PESO": "{:,.4f}",
-                comp_var_peso: "{:,.4f}",
-                "KG_TOTAL": "{:,.4f}",
-                "HA_TURNO_UNICA": "{:,.4f}",
-            }
-            st.dataframe(
-                summary_peso.style.format(fmt_dict),
-                use_container_width=True
+            summary_peso, detail_peso = build_entity_maxmin_summary(
+                dff,
+                level_mode=level_mode_peso,
+                metric_name="PESO",
+                comp_vars=comp_vars_peso
             )
-            render_maxmin_chart(summary_peso, "PESO", comp_var_peso, level_mode_peso)
+
+            if summary_peso.empty:
+                st.info("No hay datos suficientes para calcular MAX/MIN de PESO.")
+            else:
+                fmt_dict = {
+                    "PESO": "{:,.4f}",
+                    "KG_TOTAL": "{:,.4f}",
+                    "HA_TURNO_UNICA": "{:,.4f}",
+                }
+                for comp_var in comp_vars_peso:
+                    fmt_dict[comp_var] = "{:,.4f}"
+
+                st.dataframe(
+                    summary_peso.style.format(fmt_dict),
+                    use_container_width=True
+                )
+                render_maxmin_chart(summary_peso, "PESO", comp_vars_peso, level_mode_peso)
 
 st.divider()
 
