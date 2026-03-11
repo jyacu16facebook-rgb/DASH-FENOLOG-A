@@ -585,7 +585,7 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
     )
 
     desc["CV(%)"] = desc["CV_VAL"].apply(
-        lambda x: "NA" if pd.isna(x) else f"{x:.1f}({x*100:.0f}%)"
+        lambda x: "NA" if pd.isna(x) else f"{x*100:.0f}%"
     )
 
     return desc[["GRUPO", "MEDIANA", "DESV_STD", "CV(%)"]]
