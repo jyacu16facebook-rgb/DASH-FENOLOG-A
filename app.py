@@ -553,7 +553,7 @@ def render_variance_metrics(result: dict):
 
 def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
     if df_plot.empty or group_col not in df_plot.columns or value_col not in df_plot.columns:
-        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD"])
+        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD", "CV(%)"])
 
     tmp = df_plot[[group_col, value_col]].copy()
     tmp[group_col] = tmp[group_col].astype(str).str.strip()
@@ -562,21 +562,33 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
     tmp = tmp.dropna(subset=[group_col, value_col]).copy()
 
     if tmp.empty:
-        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD"])
+        return pd.DataFrame(columns=["GRUPO", "MEDIANA", "DESV_STD", "CV(%)"])
 
     desc = (
         tmp.groupby(group_col, dropna=False)[value_col]
-        .agg(["median", "std"])
+        .agg(["mean", "median", "std"])
         .reset_index()
         .rename(columns={
             group_col: "GRUPO",
+            "mean": "MEDIA",
             "median": "MEDIANA",
             "std": "DESV_STD"
         })
     )
 
     desc["DESV_STD"] = desc["DESV_STD"].fillna(0)
-    return desc
+
+    desc["CV_VAL"] = np.where(
+        desc["MEDIA"].abs() > 0,
+        desc["DESV_STD"] / desc["MEDIA"],
+        np.nan
+    )
+
+    desc["CV(%)"] = desc["CV_VAL"].apply(
+        lambda x: "NA" if pd.isna(x) else f"{x:.1f}({x*100:.0f}%)"
+    )
+
+    return desc[["GRUPO", "MEDIANA", "DESV_STD", "CV(%)"]]
 
 def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str):
     desc = build_group_descriptive_summary(df_plot, group_col, value_col)
