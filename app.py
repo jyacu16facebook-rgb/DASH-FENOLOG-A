@@ -830,7 +830,6 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
 
     color_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
 
-    # posiciones numéricas para separar mejor MAX y MIN por campaña
     camp_pos = {camp: i * 2.0 for i, camp in enumerate(campaign_order)}
     offset_map = {"MAX": -0.35, "MIN": 0.35}
     bar_width = 0.42
@@ -878,8 +877,9 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
             )
         ))
 
-    # líneas de variables comparativas: SOLO conectar MAX y MIN de la misma campaña
-    # es decir, cada campaña tendrá su propio segmento independiente
+    # AJUSTE CORREGIDO:
+    # La línea debe salir en TODAS las campañas y SOLO unir MAX -> MIN dentro de cada campaña.
+    # Si una campaña solo tiene uno de los dos valores válidos, igual mostramos el punto.
     for comp_var in comp_vars:
         x_vals = []
         y_vals = []
@@ -887,35 +887,59 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
         customdata = []
 
         for camp in campaign_order:
-            row_max = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == "MAX")]
-            row_min = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == "MIN")]
+            pts = []
 
-            if row_max.empty or row_min.empty:
+            row_max = df_plot[(df_plot["CAMPAÑA"] == str(camp)) & (df_plot["TIPO"] == "MAX")]
+            if not row_max.empty:
+                row_max = row_max.iloc[0]
+                val_max = row_max.get(comp_var, np.nan)
+                if pd.notna(val_max):
+                    pts.append({
+                        "x": camp_pos[str(camp)] + offset_map["MAX"],
+                        "y": val_max,
+                        "text": f"{val_max:,.0f}",
+                        "camp": str(camp),
+                        "tipo": "MAX",
+                        "code": _build_entity_code(row_max, level_mode)
+                    })
+
+            row_min = df_plot[(df_plot["CAMPAÑA"] == str(camp)) & (df_plot["TIPO"] == "MIN")]
+            if not row_min.empty:
+                row_min = row_min.iloc[0]
+                val_min = row_min.get(comp_var, np.nan)
+                if pd.notna(val_min):
+                    pts.append({
+                        "x": camp_pos[str(camp)] + offset_map["MIN"],
+                        "y": val_min,
+                        "text": f"{val_min:,.0f}",
+                        "camp": str(camp),
+                        "tipo": "MIN",
+                        "code": _build_entity_code(row_min, level_mode)
+                    })
+
+            if len(pts) == 0:
                 continue
 
-            row_max = row_max.iloc[0]
-            row_min = row_min.iloc[0]
-
-            val_max = row_max.get(comp_var, np.nan)
-            val_min = row_min.get(comp_var, np.nan)
-
-            if pd.isna(val_max) or pd.isna(val_min):
-                continue
-
-            x_max = camp_pos[str(camp)] + offset_map["MAX"]
-            x_min = camp_pos[str(camp)] + offset_map["MIN"]
-
-            code_max = _build_entity_code(row_max, level_mode)
-            code_min = _build_entity_code(row_min, level_mode)
-
-            x_vals.extend([x_max, x_min, None])
-            y_vals.extend([val_max, val_min, None])
-            text_vals.extend([f"{val_max:,.0f}", f"{val_min:,.0f}", None])
-            customdata.extend([
-                [str(camp), "MAX", code_max],
-                [str(camp), "MIN", code_min],
-                [None, None, None]
-            ])
+            if len(pts) == 1:
+                p = pts[0]
+                x_vals.extend([p["x"], None])
+                y_vals.extend([p["y"], None])
+                text_vals.extend([p["text"], None])
+                customdata.extend([
+                    [p["camp"], p["tipo"], p["code"]],
+                    [None, None, None]
+                ])
+            else:
+                pts = sorted(pts, key=lambda z: z["x"])
+                for p in pts:
+                    x_vals.append(p["x"])
+                    y_vals.append(p["y"])
+                    text_vals.append(p["text"])
+                    customdata.append([p["camp"], p["tipo"], p["code"]])
+                x_vals.append(None)
+                y_vals.append(None)
+                text_vals.append(None)
+                customdata.append([None, None, None])
 
         fig.add_trace(go.Scatter(
             x=x_vals,
@@ -999,13 +1023,10 @@ def build_evolution_maxmin_summary(
     key_to_tipo = base_rows.set_index("ENTITY_KEY")["TIPO"].to_dict()
     evol["TIPO_REF"] = evol["ENTITY_KEY"].map(key_to_tipo)
 
-    # Adjuntar variables comparativas a la evolución; ya vienen dentro del mismo detail
-    # y no se requiere recalcular nada adicional
     campaign_order = _sort_campaign_categories(evol["CAMPAÑA"])
     evol["CAMPAÑA"] = pd.Categorical(evol["CAMPAÑA"], categories=campaign_order, ordered=True)
     evol = evol.sort_values(["TIPO_REF", "CAMPAÑA"]).reset_index(drop=True)
 
-    # tabla base seleccionada de la campaña ancla
     base_rows["CAMPAÑA"] = pd.Categorical(base_rows["CAMPAÑA"].astype(str), categories=_sort_campaign_categories(base_rows["CAMPAÑA"].astype(str)), ordered=True)
     base_rows = base_rows.sort_values(["CAMPAÑA", "TIPO"]).reset_index(drop=True)
 
@@ -1024,7 +1045,6 @@ def render_evolution_chart(base_df: pd.DataFrame, evol_df: pd.DataFrame, metric_
 
     color_metric_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
 
-    # Barras de métrica, una línea/barra para MAX y otra para MIN, corridas entre campañas
     for tipo_ref in ["MAX", "MIN"]:
         d = df_plot[df_plot["TIPO_REF"] == tipo_ref].copy()
         d = d.sort_values("CAMPAÑA")
@@ -1064,7 +1084,6 @@ def render_evolution_chart(base_df: pd.DataFrame, evol_df: pd.DataFrame, metric_
             )
         ))
 
-    # Líneas corridas entre campañas: una para MAX y otra para MIN por cada variable comparativa
     dash_map = {"MAX": "solid", "MIN": "dot"}
 
     for comp_var in comp_vars:
