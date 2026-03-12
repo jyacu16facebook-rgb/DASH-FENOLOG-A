@@ -780,6 +780,43 @@ def _build_entity_code(row: pd.Series, level_mode: str) -> str:
         return f"{etapa},{campo},{turno}"
     return f"{etapa},{campo}"
 
+def _build_entity_key(row: pd.Series, level_mode: str) -> str:
+    if level_mode == "TURNO":
+        parts = [
+            str(row.get("FUNDO", "")).strip(),
+            str(row.get("ETAPA", "")).strip(),
+            str(row.get("CAMPO", "")).strip(),
+            str(row.get("TURNO", "")).strip(),
+            str(row.get("VARIEDAD", "")).strip(),
+        ]
+    else:
+        parts = [
+            str(row.get("FUNDO", "")).strip(),
+            str(row.get("ETAPA", "")).strip(),
+            str(row.get("CAMPO", "")).strip(),
+            str(row.get("VARIEDAD", "")).strip(),
+        ]
+    return "||".join(parts)
+
+def _parse_entity_key(entity_key: str, level_mode: str) -> dict:
+    parts = str(entity_key).split("||")
+    if level_mode == "TURNO":
+        parts = (parts + [""] * 5)[:5]
+        return {
+            "FUNDO": parts[0],
+            "ETAPA": parts[1],
+            "CAMPO": parts[2],
+            "TURNO": parts[3],
+            "VARIEDAD": parts[4],
+        }
+    parts = (parts + [""] * 4)[:4]
+    return {
+        "FUNDO": parts[0],
+        "ETAPA": parts[1],
+        "CAMPO": parts[2],
+        "VARIEDAD": parts[3],
+    }
+
 def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: list, level_mode: str):
     if summary_df.empty:
         st.info("No hay datos suficientes para mostrar la comparación MAX/MIN.")
@@ -841,7 +878,8 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
             )
         ))
 
-    # líneas de variables comparativas, también separadas por MAX y MIN dentro de cada campaña
+    # líneas de variables comparativas: SOLO conectar MAX y MIN de la misma campaña
+    # es decir, cada campaña tendrá su propio segmento independiente
     for comp_var in comp_vars:
         x_vals = []
         y_vals = []
@@ -849,23 +887,35 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
         customdata = []
 
         for camp in campaign_order:
-            for tipo in ["MAX", "MIN"]:
-                row = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == tipo)]
-                if row.empty:
-                    continue
+            row_max = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == "MAX")]
+            row_min = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == "MIN")]
 
-                row = row.iloc[0]
-                comp_val = row.get(comp_var, np.nan)
-                if pd.isna(comp_val):
-                    continue
+            if row_max.empty or row_min.empty:
+                continue
 
-                x_pos = camp_pos[str(camp)] + offset_map[tipo]
-                entity_code = _build_entity_code(row, level_mode)
+            row_max = row_max.iloc[0]
+            row_min = row_min.iloc[0]
 
-                x_vals.append(x_pos)
-                y_vals.append(comp_val)
-                text_vals.append(f"{comp_val:,.0f}")
-                customdata.append([str(camp), tipo, entity_code])
+            val_max = row_max.get(comp_var, np.nan)
+            val_min = row_min.get(comp_var, np.nan)
+
+            if pd.isna(val_max) or pd.isna(val_min):
+                continue
+
+            x_max = camp_pos[str(camp)] + offset_map["MAX"]
+            x_min = camp_pos[str(camp)] + offset_map["MIN"]
+
+            code_max = _build_entity_code(row_max, level_mode)
+            code_min = _build_entity_code(row_min, level_mode)
+
+            x_vals.extend([x_max, x_min, None])
+            y_vals.extend([val_max, val_min, None])
+            text_vals.extend([f"{val_max:,.0f}", f"{val_min:,.0f}", None])
+            customdata.extend([
+                [str(camp), "MAX", code_max],
+                [str(camp), "MIN", code_min],
+                [None, None, None]
+            ])
 
         fig.add_trace(go.Scatter(
             x=x_vals,
@@ -905,6 +955,175 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
         height=620,
         margin=dict(t=95, b=70, l=40, r=40),
         bargap=0.30
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def build_evolution_maxmin_summary(
+    df_input: pd.DataFrame,
+    level_mode: str,
+    metric_name: str,
+    comp_vars: list,
+    campaign_anchor: str
+):
+    if df_input.empty or not campaign_anchor:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    summary_base, detail_all = build_entity_maxmin_summary(
+        df_input=df_input,
+        level_mode=level_mode,
+        metric_name=metric_name,
+        comp_vars=comp_vars
+    )
+
+    if summary_base.empty or detail_all.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    campaign_anchor = str(campaign_anchor).strip()
+    base_rows = summary_base[summary_base["CAMPAÑA"].astype(str) == campaign_anchor].copy()
+
+    if base_rows.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    base_rows["ENTITY_KEY"] = base_rows.apply(lambda r: _build_entity_key(r, level_mode), axis=1)
+
+    detail = detail_all.copy()
+    detail["CAMPAÑA"] = detail["CAMPAÑA"].astype(str)
+    detail["ENTITY_KEY"] = detail.apply(lambda r: _build_entity_key(r, level_mode), axis=1)
+
+    selected_keys = base_rows["ENTITY_KEY"].dropna().unique().tolist()
+    evol = detail[detail["ENTITY_KEY"].isin(selected_keys)].copy()
+
+    if evol.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    key_to_tipo = base_rows.set_index("ENTITY_KEY")["TIPO"].to_dict()
+    evol["TIPO_REF"] = evol["ENTITY_KEY"].map(key_to_tipo)
+
+    # Adjuntar variables comparativas a la evolución; ya vienen dentro del mismo detail
+    # y no se requiere recalcular nada adicional
+    campaign_order = _sort_campaign_categories(evol["CAMPAÑA"])
+    evol["CAMPAÑA"] = pd.Categorical(evol["CAMPAÑA"], categories=campaign_order, ordered=True)
+    evol = evol.sort_values(["TIPO_REF", "CAMPAÑA"]).reset_index(drop=True)
+
+    # tabla base seleccionada de la campaña ancla
+    base_rows["CAMPAÑA"] = pd.Categorical(base_rows["CAMPAÑA"].astype(str), categories=_sort_campaign_categories(base_rows["CAMPAÑA"].astype(str)), ordered=True)
+    base_rows = base_rows.sort_values(["CAMPAÑA", "TIPO"]).reset_index(drop=True)
+
+    return base_rows, evol, detail_all
+
+def render_evolution_chart(base_df: pd.DataFrame, evol_df: pd.DataFrame, metric_name: str, comp_vars: list, level_mode: str, campaign_anchor: str):
+    if base_df.empty or evol_df.empty:
+        st.info("No hay datos suficientes para mostrar la evolución.")
+        return
+
+    df_plot = evol_df.copy()
+    df_plot["CAMPAÑA"] = df_plot["CAMPAÑA"].astype(str)
+    campaign_order = _sort_campaign_categories(df_plot["CAMPAÑA"])
+
+    fig = go.Figure()
+
+    color_metric_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
+
+    # Barras de métrica, una línea/barra para MAX y otra para MIN, corridas entre campañas
+    for tipo_ref in ["MAX", "MIN"]:
+        d = df_plot[df_plot["TIPO_REF"] == tipo_ref].copy()
+        d = d.sort_values("CAMPAÑA")
+
+        x_vals = []
+        y_vals = []
+        text_vals = []
+        customdata = []
+
+        for _, r in d.iterrows():
+            metric_val = r.get("METRICA", np.nan)
+            if pd.isna(metric_val):
+                continue
+
+            entity_code = _build_entity_code(r, level_mode)
+            x_vals.append(str(r["CAMPAÑA"]))
+            y_vals.append(metric_val)
+            text_vals.append(f"{entity_code}<br>{metric_val:,.0f}")
+            customdata.append([str(r["CAMPAÑA"]), tipo_ref, entity_code])
+
+        fig.add_trace(go.Bar(
+            x=x_vals,
+            y=y_vals,
+            name=f"{metric_name} {tipo_ref}",
+            yaxis="y1",
+            marker_color=color_metric_map[tipo_ref],
+            text=text_vals,
+            textposition="outside",
+            textfont=dict(size=11),
+            cliponaxis=False,
+            customdata=customdata,
+            hovertemplate=(
+                "Campaña: %{customdata[0]}<br>"
+                "Referencia: %{customdata[1]}<br>"
+                f"Código: " + "%{customdata[2]}<br>"
+                f"{metric_name}: %{{y:,.2f}}<extra></extra>"
+            )
+        ))
+
+    # Líneas corridas entre campañas: una para MAX y otra para MIN por cada variable comparativa
+    dash_map = {"MAX": "solid", "MIN": "dot"}
+
+    for comp_var in comp_vars:
+        for tipo_ref in ["MAX", "MIN"]:
+            d = df_plot[df_plot["TIPO_REF"] == tipo_ref].copy()
+            d = d.sort_values("CAMPAÑA")
+
+            x_vals = []
+            y_vals = []
+            text_vals = []
+            customdata = []
+
+            for _, r in d.iterrows():
+                comp_val = r.get(comp_var, np.nan)
+                if pd.isna(comp_val):
+                    continue
+
+                entity_code = _build_entity_code(r, level_mode)
+                x_vals.append(str(r["CAMPAÑA"]))
+                y_vals.append(comp_val)
+                text_vals.append(f"{comp_val:,.0f}")
+                customdata.append([str(r["CAMPAÑA"]), tipo_ref, entity_code])
+
+            fig.add_trace(go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="lines+markers+text",
+                name=f"{comp_var} {tipo_ref}",
+                yaxis="y2",
+                text=text_vals,
+                textposition="top center",
+                textfont=dict(size=10),
+                marker=dict(size=8),
+                line=dict(dash=dash_map[tipo_ref]),
+                customdata=customdata,
+                hovertemplate=(
+                    "Campaña: %{customdata[0]}<br>"
+                    "Referencia: %{customdata[1]}<br>"
+                    f"Código: " + "%{customdata[2]}<br>"
+                    f"{comp_var}: %{{y:,.2f}}<extra></extra>"
+                ),
+                connectgaps=False
+            ))
+
+    fig.update_layout(
+        title=f"Evolución de MAX/MIN de {metric_name} tomando como referencia la campaña {campaign_anchor}",
+        xaxis=dict(
+            title="CAMPAÑA",
+            type="category",
+            categoryorder="array",
+            categoryarray=campaign_order
+        ),
+        yaxis=dict(title=metric_name),
+        yaxis2=dict(title="Variables comparativas", overlaying="y", side="right"),
+        legend=dict(orientation="h"),
+        height=650,
+        margin=dict(t=95, b=70, l=40, r=40),
+        bargap=0.25,
+        barmode="group"
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1571,6 +1790,146 @@ else:
                     use_container_width=True
                 )
                 render_maxmin_chart(summary_peso, "PESO", comp_vars_peso, level_mode_peso)
+
+st.divider()
+
+# --------------------------
+# NUEVA VISTA: EVOLUCIÓN DE MAX/MIN KG/HA
+# --------------------------
+st.subheader("EVOLUCIÓN DE MAX/MIN KG/HA")
+st.caption("Toma una campaña como referencia, identifica su MAX y MIN, y sigue esos mismos elementos hacia atrás y hacia adelante en las demás campañas.")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    comp_candidates_ev_kgha = get_comparative_candidates(dff)
+    campaign_options_ev_kgha = _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
+
+    evk_left, evk_right = st.columns([0.30, 0.70])
+
+    with evk_left:
+        level_mode_ev_kgha = st.selectbox(
+            "Filtro de análisis  ",
+            ["TURNO", "CAMPO"],
+            key="level_mode_ev_kgha"
+        )
+
+        default_comp_ev_kgha = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_ev_kgha else comp_candidates_ev_kgha[:1]
+        comp_vars_ev_kgha = st.multiselect(
+            "Variables comparativas  ",
+            comp_candidates_ev_kgha,
+            default=default_comp_ev_kgha,
+            key="comp_vars_ev_kgha"
+        )
+
+        campaign_anchor_kgha = st.selectbox(
+            "CAMPAÑA:",
+            campaign_options_ev_kgha,
+            index=len(campaign_options_ev_kgha) - 1 if campaign_options_ev_kgha else 0,
+            key="campaign_anchor_kgha"
+        )
+
+    with evk_right:
+        if not comp_vars_ev_kgha:
+            st.info("Selecciona al menos una variable comparativa.")
+        elif not campaign_anchor_kgha:
+            st.info("Selecciona una campaña base.")
+        else:
+            summary_base_kgha, evol_kgha, detail_all_kgha = build_evolution_maxmin_summary(
+                dff,
+                level_mode=level_mode_ev_kgha,
+                metric_name="KG/HA",
+                comp_vars=comp_vars_ev_kgha,
+                campaign_anchor=campaign_anchor_kgha
+            )
+
+            if summary_base_kgha.empty or evol_kgha.empty:
+                st.info("No hay datos suficientes para calcular la evolución de MAX/MIN de KG/HA.")
+            else:
+                fmt_dict = {
+                    "KG/HA": "{:,.4f}",
+                    "KG_TOTAL": "{:,.4f}",
+                    "HA_TURNO_UNICA": "{:,.4f}",
+                }
+                for comp_var in comp_vars_ev_kgha:
+                    fmt_dict[comp_var] = "{:,.4f}"
+
+                st.markdown(f"**Base seleccionada en campaña {campaign_anchor_kgha}**")
+                st.dataframe(
+                    summary_base_kgha.style.format(fmt_dict),
+                    use_container_width=True
+                )
+                render_evolution_chart(summary_base_kgha, evol_kgha, "KG/HA", comp_vars_ev_kgha, level_mode_ev_kgha, campaign_anchor_kgha)
+
+st.divider()
+
+# --------------------------
+# NUEVA VISTA: EVOLUCIÓN DE MAX/MIN DE PESO (G)
+# --------------------------
+st.subheader("EVOLUCIÓN DE MAX/MIN DE PESO (G)")
+st.caption("Toma una campaña como referencia, identifica su MAX y MIN de PESO, y sigue esos mismos elementos hacia atrás y hacia adelante en las demás campañas.")
+
+if dff.empty:
+    st.warning("No hay datos con los filtros actuales.")
+else:
+    comp_candidates_ev_peso = get_comparative_candidates(dff)
+    campaign_options_ev_peso = _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
+
+    evp_left, evp_right = st.columns([0.30, 0.70])
+
+    with evp_left:
+        level_mode_ev_peso = st.selectbox(
+            "Filtro de análisis   ",
+            ["TURNO", "CAMPO"],
+            key="level_mode_ev_peso"
+        )
+
+        default_comp_ev_peso = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_ev_peso else comp_candidates_ev_peso[:1]
+        comp_vars_ev_peso = st.multiselect(
+            "Variables comparativas   ",
+            comp_candidates_ev_peso,
+            default=default_comp_ev_peso,
+            key="comp_vars_ev_peso"
+        )
+
+        campaign_anchor_peso = st.selectbox(
+            "CAMPAÑA: ",
+            campaign_options_ev_peso,
+            index=len(campaign_options_ev_peso) - 1 if campaign_options_ev_peso else 0,
+            key="campaign_anchor_peso"
+        )
+
+    with evp_right:
+        if not comp_vars_ev_peso:
+            st.info("Selecciona al menos una variable comparativa.")
+        elif not campaign_anchor_peso:
+            st.info("Selecciona una campaña base.")
+        else:
+            summary_base_peso, evol_peso, detail_all_peso = build_evolution_maxmin_summary(
+                dff,
+                level_mode=level_mode_ev_peso,
+                metric_name="PESO",
+                comp_vars=comp_vars_ev_peso,
+                campaign_anchor=campaign_anchor_peso
+            )
+
+            if summary_base_peso.empty or evol_peso.empty:
+                st.info("No hay datos suficientes para calcular la evolución de MAX/MIN de PESO.")
+            else:
+                fmt_dict = {
+                    "PESO": "{:,.4f}",
+                    "KG_TOTAL": "{:,.4f}",
+                    "HA_TURNO_UNICA": "{:,.4f}",
+                }
+                for comp_var in comp_vars_ev_peso:
+                    fmt_dict[comp_var] = "{:,.4f}"
+
+                st.markdown(f"**Base seleccionada en campaña {campaign_anchor_peso}**")
+                st.dataframe(
+                    summary_base_peso.style.format(fmt_dict),
+                    use_container_width=True
+                )
+                render_evolution_chart(summary_base_peso, evol_peso, "PESO", comp_vars_ev_peso, level_mode_ev_peso, campaign_anchor_peso)
 
 st.divider()
 
