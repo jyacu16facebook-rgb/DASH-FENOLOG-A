@@ -771,6 +771,15 @@ def build_entity_maxmin_summary(
 
     return summary, detail
 
+def _build_entity_code(row: pd.Series, level_mode: str) -> str:
+    etapa = str(row.get("ETAPA", "")).strip()
+    campo = str(row.get("CAMPO", "")).strip()
+
+    if level_mode == "TURNO":
+        turno = str(row.get("TURNO", "")).strip()
+        return f"{etapa},{campo},{turno}"
+    return f"{etapa},{campo}"
+
 def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: list, level_mode: str):
     if summary_df.empty:
         st.info("No hay datos suficientes para mostrar la comparación MAX/MIN.")
@@ -784,65 +793,79 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
 
     color_map = {"MAX": "#156cc2", "MIN": "#8bbcf0"}
 
+    # posiciones numéricas para separar mejor MAX y MIN por campaña
+    camp_pos = {camp: i * 2.0 for i, camp in enumerate(campaign_order)}
+    offset_map = {"MAX": -0.35, "MIN": 0.35}
+    bar_width = 0.42
+
     for tipo in ["MAX", "MIN"]:
         d = df_plot[df_plot["TIPO"] == tipo].copy()
         d = d.set_index("CAMPAÑA").reindex(campaign_order).reset_index()
 
-        customdata = []
         x_vals = []
         y_vals = []
         text_vals = []
+        customdata = []
 
         for _, r in d.iterrows():
-            if pd.isna(r.get(metric_name, np.nan)):
+            metric_val = r.get(metric_name, np.nan)
+            if pd.isna(metric_val):
                 continue
 
-            camp = r["CAMPAÑA"]
-            if level_mode == "TURNO":
-                label_entidad = f"{r['TURNO']} ({r['CAMPO']})"
-            else:
-                label_entidad = f"{r['CAMPO']}"
+            camp = str(r["CAMPAÑA"])
+            x_pos = camp_pos[camp] + offset_map[tipo]
+            entity_code = _build_entity_code(r, level_mode)
 
-            x_vals.append(camp)
-            y_vals.append(r[metric_name])
-            text_vals.append(f"{r[metric_name]:,.0f}")
-            customdata.append([label_entidad, tipo])
+            x_vals.append(x_pos)
+            y_vals.append(metric_val)
+            text_vals.append(f"{entity_code}<br>{metric_val:,.0f}")
+            customdata.append([camp, tipo, entity_code])
 
         fig.add_trace(go.Bar(
             x=x_vals,
             y=y_vals,
             name=f"{metric_name} {tipo}",
             yaxis="y1",
-            width=0.25,
-            offsetgroup=tipo,
+            width=bar_width,
             marker_color=color_map[tipo],
             text=text_vals,
             textposition="outside",
             textfont=dict(size=11),
+            cliponaxis=False,
             customdata=customdata,
             hovertemplate=(
-                "Campaña: %{x}<br>"
+                "Campaña: %{customdata[0]}<br>"
                 "Tipo: %{customdata[1]}<br>"
-                f"{level_mode}: " + "%{customdata[0]}<br>"
+                f"Código: " + "%{customdata[2]}<br>"
                 f"{metric_name}: %{{y:,.2f}}<extra></extra>"
             )
         ))
 
+    # líneas de variables comparativas, también separadas por MAX y MIN dentro de cada campaña
     for comp_var in comp_vars:
         x_vals = []
         y_vals = []
         text_vals = []
+        customdata = []
 
         for camp in campaign_order:
             for tipo in ["MAX", "MIN"]:
                 row = df_plot[(df_plot["CAMPAÑA"] == camp) & (df_plot["TIPO"] == tipo)]
                 if row.empty:
                     continue
-                row = row.iloc[0]
 
-                x_vals.append(camp)
-                y_vals.append(row.get(comp_var, np.nan))
-                text_vals.append("NA" if pd.isna(row.get(comp_var, np.nan)) else f"{row.get(comp_var):,.0f}")
+                row = row.iloc[0]
+                comp_val = row.get(comp_var, np.nan)
+                if pd.isna(comp_val):
+                    continue
+
+                x_pos = camp_pos[str(camp)] + offset_map[tipo]
+                entity_code = _build_entity_code(row, level_mode)
+
+                x_vals.append(x_pos)
+                y_vals.append(comp_val)
+                text_vals.append(f"{comp_val:,.0f}")
+                customdata.append([str(camp), tipo, entity_code])
 
         fig.add_trace(go.Scatter(
             x=x_vals,
@@ -853,24 +876,35 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
             text=text_vals,
             textposition="top center",
             textfont=dict(size=10),
+            marker=dict(size=8),
+            customdata=customdata,
+            hovertemplate=(
+                "Campaña: %{customdata[0]}<br>"
+                "Tipo: %{customdata[1]}<br>"
+                f"Código: " + "%{customdata[2]}<br>"
+                f"{comp_var}: %{{y:,.2f}}<extra></extra>"
+            ),
             connectgaps=False
         ))
+
+    tickvals = [camp_pos[c] for c in campaign_order]
+    ticktext = campaign_order
 
     fig.update_layout(
         title=f"MAX vs MIN de {metric_name} por {level_mode} + {', '.join(comp_vars)}",
         xaxis=dict(
-            type="category",
             title="CAMPAÑA",
-            categoryorder="array",
-            categoryarray=campaign_order
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            range=[min(tickvals) - 0.9, max(tickvals) + 0.9] if tickvals else None
         ),
         yaxis=dict(title=metric_name),
         yaxis2=dict(title="Variables comparativas", overlaying="y", side="right"),
         legend=dict(orientation="h"),
-        height=580,
-        margin=dict(t=80, b=60),
-        bargap=0.55,
-        bargroupgap=0.15
+        height=620,
+        margin=dict(t=95, b=70, l=40, r=40),
+        bargap=0.30
     )
     st.plotly_chart(fig, use_container_width=True)
 
