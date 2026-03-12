@@ -1,6 +1,7 @@
 # app.py
 # ==========================================================
 # DASH: Fenología vs rendimiento
+# OPTIMIZADO SIN CAMBIAR LA LÓGICA
 # ==========================================================
 
 import os
@@ -87,8 +88,19 @@ SUM_X_COLS = [
     "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO"
 ]
 
-# Variables comparativas tipo suma
 SUM_COMPARATIVE_COLS = SUM_X_COLS + ["kilogramos"]
+
+NUM_MAIN = [
+    "AÑO", "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
+    "Ha COSECHADA", "Ha TURNO", "KG/HA", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
+    "PESO BAYA (g)", "PESO BAYA CREMOSO (g)", "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
+    "SEMANA DE SIEMBRA",
+    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA",
+    "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
+    "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
+    "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
+]
 
 # --------------------------
 # HELPERS
@@ -115,10 +127,12 @@ def sum_numeric(x: pd.Series) -> float:
 
 def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
     if "EDAD PLANTA FINAL" in df.columns:
-        df["EDAD PLANTA FINAL"] = df["EDAD PLANTA FINAL"].astype(str).str.strip()
-        df.loc[df["EDAD PLANTA FINAL"].isin(["3", "3.0", "3.00"]), "EDAD PLANTA FINAL"] = "3+"
+        out = df.copy()
+        out["EDAD PLANTA FINAL"] = out["EDAD PLANTA FINAL"].astype(str).str.strip()
+        out.loc[out["EDAD PLANTA FINAL"].isin(["3", "3.0", "3.00"]), "EDAD PLANTA FINAL"] = "3+"
         order = ["1", "2", "3+"]
-        df["EDAD PLANTA FINAL"] = pd.Categorical(df["EDAD PLANTA FINAL"], categories=order, ordered=True)
+        out["EDAD PLANTA FINAL"] = pd.Categorical(out["EDAD PLANTA FINAL"], categories=order, ordered=True)
+        return out
     return df
 
 @st.cache_data(show_spinner=False)
@@ -128,28 +142,42 @@ def read_excel_path(path: str, sheet: str) -> pd.DataFrame:
 def validate_cols(df: pd.DataFrame) -> list:
     return [c for c in COLS_REQUIRED if c not in df.columns]
 
+@st.cache_data(show_spinner=False)
+def preprocess_df(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+
+    df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
+    df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
+
+    for c in NUM_MAIN:
+        if c in df.columns:
+            df[c] = to_numeric_safe(df[c])
+
+    df = ensure_categories_age(df)
+    return df
+
 def apply_filters(df: pd.DataFrame,
                   camp, fundo, etapa, campo, turno, variedad, edad_final,
                   semana_min, semana_max):
-    dff = df.copy()
+    mask = pd.Series(True, index=df.index)
 
     if camp:
-        dff = dff[dff["CAMPAÑA"].isin(camp)]
+        mask &= df["CAMPAÑA"].isin(camp)
     if fundo:
-        dff = dff[dff["FUNDO"].isin(fundo)]
+        mask &= df["FUNDO"].isin(fundo)
     if etapa:
-        dff = dff[dff["ETAPA"].isin(etapa)]
+        mask &= df["ETAPA"].isin(etapa)
     if campo:
-        dff = dff[dff["CAMPO"].isin(campo)]
+        mask &= df["CAMPO"].isin(campo)
     if turno:
-        dff = dff[dff["TURNO"].isin(turno)]
+        mask &= df["TURNO"].isin(turno)
     if variedad:
-        dff = dff[dff["VARIEDAD"].isin(variedad)]
+        mask &= df["VARIEDAD"].isin(variedad)
     if edad_final:
-        dff = dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]
+        mask &= df["EDAD PLANTA FINAL"].isin(edad_final)
 
-    dff = dff[(dff["SEMANA"] >= semana_min) & (dff["SEMANA"] <= semana_max)]
-    return dff
+    mask &= (df["SEMANA"] >= semana_min) & (df["SEMANA"] <= semana_max)
+    return df.loc[mask].copy()
 
 def _sort_campaign_categories(campaign_series: pd.Series):
     uniq = campaign_series.dropna().astype(str).unique().tolist()
@@ -167,12 +195,13 @@ def first_valid(series: pd.Series):
     s = series.dropna()
     return s.iloc[0] if not s.empty else np.nan
 
+@st.cache_data(show_spinner=False)
 def build_unique_turno_table(df_subset: pd.DataFrame) -> pd.DataFrame:
     if df_subset.empty:
         return pd.DataFrame(columns=UNIT_COLS_BASE + ["Ha_TURNO_u", "DENSIDAD_u"])
 
     base = (
-        df_subset.groupby(UNIT_COLS_BASE, dropna=False)
+        df_subset.groupby(UNIT_COLS_BASE, dropna=False, observed=True)
         .agg(
             Ha_TURNO_u=("Ha TURNO", first_valid),
             DENSIDAD_u=("DENSIDAD", first_valid),
@@ -184,16 +213,19 @@ def build_unique_turno_table(df_subset: pd.DataFrame) -> pd.DataFrame:
     base["DENSIDAD_u"] = to_numeric_safe(base["DENSIDAD_u"])
     return base
 
+@st.cache_data(show_spinner=False)
 def unique_turno_area_sum(df_subset: pd.DataFrame) -> float:
     base = build_unique_turno_table(df_subset)
     if base.empty:
         return 0.0
     return float(base["Ha_TURNO_u"].sum(skipna=True))
 
+@st.cache_data(show_spinner=False)
 def unique_turno_plants_sum(df_subset: pd.DataFrame) -> float:
     base = build_unique_turno_table(df_subset)
     if base.empty:
         return 0.0
+    base = base.copy()
     base["PLANTAS_EST"] = base["Ha_TURNO_u"] * base["DENSIDAD_u"]
     return float(base["PLANTAS_EST"].sum(skipna=True))
 
@@ -217,14 +249,13 @@ def weighted_density_by_turno_area(df_subset: pd.DataFrame) -> float:
         return np.nan
     return weighted_mean(base["DENSIDAD_u"], base["Ha_TURNO_u"])
 
+@st.cache_data(show_spinner=False)
 def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=[
-            "CAMPAÑA", "KG", "KG/HA", "PESO", "CALIBRE", "ÁREA"
-        ])
+        return pd.DataFrame(columns=["CAMPAÑA", "KG", "KG/HA", "PESO", "CALIBRE", "ÁREA"])
 
     out = []
-    for camp, g in df.groupby("CAMPAÑA", dropna=False):
+    for camp, g in df.groupby("CAMPAÑA", dropna=False, observed=True):
         out.append({
             "CAMPAÑA": str(camp),
             "KG": sum_numeric(g["kilogramos"]),
@@ -239,12 +270,15 @@ def campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     res["CAMPAÑA"] = pd.Categorical(res["CAMPAÑA"], categories=cats, ordered=True)
     return res.sort_values("CAMPAÑA").reset_index(drop=True)
 
+@st.cache_data(show_spinner=False)
 def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = "weighted") -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=level_cols + ["y_val", "w_sum", "kg_sum", "area_sum"])
 
     rows = []
-    for keys, g in df.groupby(level_cols, dropna=False):
+    gb = df.groupby(level_cols, dropna=False, observed=True)
+
+    for keys, g in gb:
         if not isinstance(keys, tuple):
             keys = (keys,)
         rec = {col: keys[i] for i, col in enumerate(level_cols)}
@@ -312,7 +346,7 @@ def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
     d["CAMPAÑA_NUM"] = pd.to_numeric(d["CAMPAÑA"].astype(str).str.strip(), errors="coerce")
 
     starts = []
-    for camp, g in d.groupby("CAMPAÑA", dropna=False):
+    for camp, g in d.groupby("CAMPAÑA", dropna=False, observed=True):
         camp_num = pd.to_numeric(str(camp).strip(), errors="coerce")
 
         if pd.notna(camp_num):
@@ -332,12 +366,13 @@ def compute_campaign_axis_start_week(dff: pd.DataFrame) -> int:
     start_global = max(1, min(52, start_global))
     return start_global
 
+@st.cache_data(show_spinner=False)
 def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["CAMPAÑA", "KG/PLANTA"])
 
     rows = []
-    for camp, g in df.groupby("CAMPAÑA", dropna=False):
+    for camp, g in df.groupby("CAMPAÑA", dropna=False, observed=True):
         kg_total = sum_numeric(g["kilogramos"])
         area_total = unique_turno_area_sum(g)
         densidad_pond = weighted_density_by_turno_area(g)
@@ -372,7 +407,7 @@ def build_siembra_final_biometric_summary(dff: pd.DataFrame, metric_col: str) ->
         return pd.DataFrame()
 
     summary = (
-        tmp.groupby("SIEMBRA FINAL")[metric_col]
+        tmp.groupby("SIEMBRA FINAL", observed=True)[metric_col]
         .agg(["count", "mean", "median", "std", "min", "max"])
         .reset_index()
         .rename(columns={
@@ -457,7 +492,7 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
         return out
 
     grouped = []
-    for gname, gdf in tmp.groupby(group_col, dropna=False):
+    for _, gdf in tmp.groupby(group_col, dropna=False, observed=True):
         vals = pd.to_numeric(gdf[value_col], errors="coerce").dropna().values
         if len(vals) > 0:
             grouped.append(vals)
@@ -574,7 +609,7 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
         return pd.DataFrame(columns=["GRUPO", "MEDIA", "DESV_STD", "CV(%)"])
 
     desc = (
-        tmp.groupby(group_col, dropna=False)[value_col]
+        tmp.groupby(group_col, dropna=False, observed=True)[value_col]
         .agg(["mean", "std"])
         .reset_index()
         .rename(columns={
@@ -662,6 +697,7 @@ def compute_general_metric_value(df_subset: pd.DataFrame, metric_name: str) -> f
 
     return np.nan
 
+@st.cache_data(show_spinner=False)
 def build_boxplot_metric_df(dff: pd.DataFrame, group_col: str, metric_name: str) -> pd.DataFrame:
     cfg = get_general_metric_config(metric_name)
     level_cols = UNIT_COLS_BASE + [group_col]
@@ -762,9 +798,7 @@ def comparative_value_campo(df_subset: pd.DataFrame, comp_var: str) -> float:
         return sum_numeric(df_subset[comp_var])
 
     rows = []
-    for keys, g in df_subset.groupby(UNIT_COLS_BASE, dropna=False):
-        if not isinstance(keys, tuple):
-            keys = (keys,)
+    for _, g in df_subset.groupby(UNIT_COLS_BASE, dropna=False, observed=True):
         ha_turno = to_numeric_safe(g["Ha TURNO"])
         ha_turno_u = first_valid(ha_turno)
         val_turno = simple_mean(g[comp_var])
@@ -779,6 +813,7 @@ def comparative_value_campo(df_subset: pd.DataFrame, comp_var: str) -> float:
 
     return weighted_mean(base["VAL"], base["HA_TURNO"])
 
+@st.cache_data(show_spinner=False)
 def build_entity_maxmin_summary(
     df_input: pd.DataFrame,
     level_mode: str,
@@ -795,13 +830,12 @@ def build_entity_maxmin_summary(
 
     rows = []
 
-    for keys, g in df_input.groupby(level_cols, dropna=False):
+    for keys, g in df_input.groupby(level_cols, dropna=False, observed=True):
         if not isinstance(keys, tuple):
             keys = (keys,)
 
         rec = {col: keys[i] for i, col in enumerate(level_cols)}
-
-        metric_val = compute_general_metric_value(g, metric_name)
+        rec["METRICA"] = compute_general_metric_value(g, metric_name)
 
         for comp_var in comp_vars:
             if level_mode == "TURNO":
@@ -809,23 +843,22 @@ def build_entity_maxmin_summary(
             else:
                 rec[comp_var] = comparative_value_campo(g, comp_var)
 
-        rec["METRICA"] = metric_val
         rec["KG_TOTAL"] = sum_numeric(g["kilogramos"])
         rec["AREA_TURNO_UNICA"] = unique_turno_area_sum(g)
         rows.append(rec)
 
     detail = pd.DataFrame(rows)
     if detail.empty:
-        return pd.DataFrame(), detail
+        return pd.DataFrame(), pd.DataFrame()
 
     detail = detail.dropna(subset=["METRICA"]).copy()
     if detail.empty:
-        return pd.DataFrame(), detail
+        return pd.DataFrame(), pd.DataFrame()
 
     detail["CAMPAÑA"] = detail["CAMPAÑA"].astype(str)
     summary_rows = []
 
-    for camp, gcamp in detail.groupby("CAMPAÑA", dropna=False):
+    for _, gcamp in detail.groupby("CAMPAÑA", dropna=False, observed=True):
         gcamp = gcamp.sort_values("METRICA", ascending=False).reset_index(drop=True)
         row_max = gcamp.iloc[0].copy()
         row_min = gcamp.iloc[-1].copy()
@@ -1085,6 +1118,7 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
     )
     st.plotly_chart(fig, use_container_width=True)
 
+@st.cache_data(show_spinner=False)
 def build_evolution_maxmin_summary(
     df_input: pd.DataFrame,
     level_mode: str,
@@ -1130,7 +1164,11 @@ def build_evolution_maxmin_summary(
     evol["CAMPAÑA"] = pd.Categorical(evol["CAMPAÑA"], categories=campaign_order, ordered=True)
     evol = evol.sort_values(["TIPO_REF", "CAMPAÑA"]).reset_index(drop=True)
 
-    base_rows["CAMPAÑA"] = pd.Categorical(base_rows["CAMPAÑA"].astype(str), categories=_sort_campaign_categories(base_rows["CAMPAÑA"].astype(str)), ordered=True)
+    base_rows["CAMPAÑA"] = pd.Categorical(
+        base_rows["CAMPAÑA"].astype(str),
+        categories=_sort_campaign_categories(base_rows["CAMPAÑA"].astype(str)),
+        ordered=True
+    )
     base_rows = base_rows.sort_values(["CAMPAÑA", "TIPO"]).reset_index(drop=True)
 
     return base_rows, evol, detail_all
@@ -1275,27 +1313,7 @@ if missing:
     st.write(missing)
     st.stop()
 
-df = df_raw.copy()
-
-df["SEMANA"] = to_numeric_safe(df["SEMANA"]).fillna(0).astype(int)
-df["CAMPAÑA"] = df["CAMPAÑA"].astype(str).str.strip()
-
-num_main = [
-    "AÑO", "kilogramos", "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
-    "Ha COSECHADA", "Ha TURNO", "KG/HA", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
-    "PESO BAYA (g)", "PESO BAYA CREMOSO (g)", "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
-    "SEMANA DE SIEMBRA",
-    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA",
-    "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
-    "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
-    "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
-    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
-]
-for c in num_main:
-    if c in df.columns:
-        df[c] = to_numeric_safe(df[c])
-
-df = ensure_categories_age(df)
+df = preprocess_df(df_raw)
 
 # --------------------------
 # FILTERS
@@ -1458,7 +1476,7 @@ if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
     rows = []
-    for (camp, sem), g in dff.groupby(["CAMPAÑA", "SEMANA"], dropna=False):
+    for (camp, sem), g in dff.groupby(["CAMPAÑA", "SEMANA"], dropna=False, observed=True):
         rows.append({
             "CAMPAÑA": str(camp),
             "SEMANA": int(sem),
@@ -1625,7 +1643,7 @@ else:
     agg_v["CAMPAÑA"] = agg_v["CAMPAÑA"].astype(str)
 
     freq = (
-        dff.groupby("VARIEDAD")["TURNO"]
+        dff.groupby("VARIEDAD", observed=True)["TURNO"]
         .count()
         .sort_values(ascending=False)
         .reset_index()
@@ -1633,7 +1651,7 @@ else:
     )
 
     rows = []
-    for var, g in dff.groupby("VARIEDAD", dropna=False):
+    for var, g in dff.groupby("VARIEDAD", dropna=False, observed=True):
         rows.append({"VARIEDAD": var, "KG_HA": ratio_kg_over_unique_turno_area(g)})
     avg_var = pd.DataFrame(rows).merge(freq, on="VARIEDAD", how="left").fillna({"n": 0})
     avg_var = avg_var.sort_values("n", ascending=False).head(top_n)
@@ -1680,7 +1698,7 @@ if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
     rows = []
-    for (camp, edad), g in dff.groupby(["CAMPAÑA", "EDAD PLANTA FINAL"], dropna=False):
+    for (camp, edad), g in dff.groupby(["CAMPAÑA", "EDAD PLANTA FINAL"], dropna=False, observed=True):
         rows.append({
             "CAMPAÑA": str(camp),
             "EDAD PLANTA FINAL": str(edad),
@@ -1864,7 +1882,7 @@ else:
                     evol_dyn,
                     metric_general_pick,
                     comp_vars_ev_dyn,
-                    level_mode_ev_dyn,
+                    level_mode=level_mode_ev_dyn,
                     campaign_anchor_dyn
                 )
 
