@@ -113,6 +113,12 @@ def weighted_mean(x: pd.Series, w: pd.Series) -> float:
 def sum_numeric(x: pd.Series) -> float:
     return float(pd.to_numeric(x, errors="coerce").sum(skipna=True))
 
+def sum_numeric_strict(x: pd.Series) -> float:
+    x = pd.to_numeric(x, errors="coerce")
+    if x.notna().sum() == 0:
+        return np.nan
+    return float(x.sum(skipna=True))
+
 def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
     if "EDAD PLANTA FINAL" in df.columns:
         df["EDAD PLANTA FINAL"] = df["EDAD PLANTA FINAL"].astype(str).str.strip()
@@ -253,6 +259,8 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
             rec["y_val"] = simple_mean(g[y_col])
         elif mode == "sum":
             rec["y_val"] = sum_numeric(g[y_col])
+        elif mode == "sum_strict":
+            rec["y_val"] = sum_numeric_strict(g[y_col])
         elif mode == "weighted":
             rec["y_val"] = weighted_mean(g[y_col], g[W_COL])
         elif mode == "weighted_kg":
@@ -1393,7 +1401,7 @@ with right:
         if x_col == "KG/HA":
             x_mode = "ratio_kg_area_turno"
         elif x_col in SUM_X_COLS:
-            x_mode = "sum"
+            x_mode = "sum_strict"
         elif x_col in [
             "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
             "EDAD PLANTA", "SEMANA DE SIEMBRA",
