@@ -877,9 +877,6 @@ def render_maxmin_chart(summary_df: pd.DataFrame, metric_name: str, comp_vars: l
             )
         ))
 
-    # AJUSTE CORREGIDO:
-    # La línea debe salir en TODAS las campañas y SOLO unir MAX -> MIN dentro de cada campaña.
-    # Si una campaña solo tiene uno de los dos valores válidos, igual mostramos el punto.
     for comp_var in comp_vars:
         x_vals = []
         y_vals = []
@@ -1395,30 +1392,55 @@ if dff.empty:
 else:
     turn_level = UNIT_COLS_BASE + ["SIEMBRA FINAL", "EDAD PLANTA FINAL"]
 
-    agg_turn_kgha = aggregate_level(dff, turn_level, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG_HA"})
-    agg_turn_kgha = agg_turn_kgha.dropna(subset=["KG_HA"])
-
     b1, b2 = st.columns(2)
 
     with b1:
-        fig_siem = px.box(
-            agg_turn_kgha,
-            x="SIEMBRA FINAL",
-            y="KG_HA",
-            points="outliers",
-            title="KG/HA por SIEMBRA"
-        )
-        fig_siem.update_layout(
-            xaxis=dict(type="category", title="SIEMBRA"),
-            yaxis=dict(title="KG/HA")
-        )
-        st.plotly_chart(fig_siem, use_container_width=True)
+        st.caption("Compara SIEMBRA con métrica dinámica: KG/HA o KG/PLANTA.")
 
-        anova_siem = analyze_variance_by_group(agg_turn_kgha, "SIEMBRA FINAL", "KG_HA")
-        render_variance_metrics(anova_siem)
-        render_group_descriptive_summary(agg_turn_kgha, "SIEMBRA FINAL", "KG_HA")
+        metric_siem_pick = st.selectbox(
+            "Métrica Y para SIEMBRA",
+            ["KG/HA", "KG/PLANTA"],
+            index=0,
+            key="metric_siem_pick"
+        )
+
+        if metric_siem_pick == "KG/HA":
+            agg_turn_siem = aggregate_level(
+                dff, turn_level, "KG/HA", mode="ratio_kg_area_turno"
+            ).rename(columns={"y_val": "METRIC_VAL"})
+        else:
+            agg_turn_siem = aggregate_level(
+                dff, turn_level, "KG/PLANTA", mode="ratio_kg_planta_turno"
+            ).rename(columns={"y_val": "METRIC_VAL"})
+
+        agg_turn_siem["SIEMBRA FINAL"] = agg_turn_siem["SIEMBRA FINAL"].astype(str).str.strip()
+        agg_turn_siem = agg_turn_siem.replace({"SIEMBRA FINAL": {"nan": np.nan, "None": np.nan, "": np.nan}})
+        agg_turn_siem = agg_turn_siem.dropna(subset=["SIEMBRA FINAL", "METRIC_VAL"]).copy()
+
+        if agg_turn_siem.empty:
+            st.info("No hay datos suficientes para SIEMBRA.")
+        else:
+            fig_siem = px.box(
+                agg_turn_siem,
+                x="SIEMBRA FINAL",
+                y="METRIC_VAL",
+                points="outliers",
+                title=f"{metric_siem_pick} por SIEMBRA"
+            )
+            fig_siem.update_layout(
+                xaxis=dict(type="category", title="SIEMBRA"),
+                yaxis=dict(title=metric_siem_pick)
+            )
+            st.plotly_chart(fig_siem, use_container_width=True)
+
+            anova_siem = analyze_variance_by_group(agg_turn_siem, "SIEMBRA FINAL", "METRIC_VAL")
+            render_variance_metrics(anova_siem)
+            render_group_descriptive_summary(agg_turn_siem, "SIEMBRA FINAL", "METRIC_VAL")
 
     with b2:
+        agg_turn_kgha = aggregate_level(dff, turn_level, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG_HA"})
+        agg_turn_kgha = agg_turn_kgha.dropna(subset=["KG_HA"])
+
         agg_turn_kgha["EDAD PLANTA FINAL"] = agg_turn_kgha["EDAD PLANTA FINAL"].astype(str)
         order_age = ["1", "2", "3+"]
         fig_age = px.box(
