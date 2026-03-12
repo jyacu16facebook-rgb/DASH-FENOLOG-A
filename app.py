@@ -50,6 +50,12 @@ METRIC_Y_OPTIONS = {
     "CALIBRE BAYA (mm)": "CALIBRE BAYA (mm)",
 }
 
+GENERAL_METRIC_OPTIONS = [
+    "KG/HA",
+    "KG/PLANTA",
+    "PESO BAYA (g)",
+]
+
 CORR_COLS = [
     "KG/HA",
     "kilogramos",
@@ -608,6 +614,109 @@ def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, valu
         use_container_width=True
     )
 
+def get_general_metric_config(metric_name: str) -> dict:
+    metric_name = str(metric_name).strip()
+
+    if metric_name == "KG/HA":
+        return {
+            "metric_name": "KG/HA",
+            "source_col": "KG/HA",
+            "agg_mode": "ratio_kg_area_turno",
+            "y_title": "KG/HA"
+        }
+
+    if metric_name == "KG/PLANTA":
+        return {
+            "metric_name": "KG/PLANTA",
+            "source_col": "KG/PLANTA",
+            "agg_mode": "ratio_kg_planta_turno",
+            "y_title": "KG/PLANTA"
+        }
+
+    if metric_name == "PESO BAYA (g)":
+        return {
+            "metric_name": "PESO BAYA (g)",
+            "source_col": "PESO BAYA (g)",
+            "agg_mode": "weighted_kg",
+            "y_title": "PESO BAYA (g)"
+        }
+
+    return {
+        "metric_name": "KG/HA",
+        "source_col": "KG/HA",
+        "agg_mode": "ratio_kg_area_turno",
+        "y_title": "KG/HA"
+    }
+
+def compute_general_metric_value(df_subset: pd.DataFrame, metric_name: str) -> float:
+    metric_name = str(metric_name).strip()
+
+    if metric_name == "KG/HA":
+        return ratio_kg_over_unique_turno_area(df_subset)
+
+    if metric_name == "KG/PLANTA":
+        return ratio_kg_planta_over_unique_turno(df_subset)
+
+    if metric_name == "PESO BAYA (g)":
+        return weighted_mean(df_subset["PESO BAYA (g)"], df_subset["kilogramos"])
+
+    return np.nan
+
+def build_boxplot_metric_df(dff: pd.DataFrame, group_col: str, metric_name: str) -> pd.DataFrame:
+    cfg = get_general_metric_config(metric_name)
+    level_cols = UNIT_COLS_BASE + [group_col]
+
+    agg_df = aggregate_level(
+        dff,
+        level_cols,
+        cfg["source_col"],
+        mode=cfg["agg_mode"]
+    ).rename(columns={"y_val": "METRIC_VAL"})
+
+    agg_df[group_col] = agg_df[group_col].astype(str).str.strip()
+    agg_df = agg_df.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
+    agg_df = agg_df.dropna(subset=[group_col, "METRIC_VAL"]).copy()
+
+    return agg_df
+
+def build_evolution_detail_table(
+    evol_df: pd.DataFrame,
+    metric_name: str,
+    comp_vars: list,
+    level_mode: str
+) -> pd.DataFrame:
+    if evol_df.empty:
+        return pd.DataFrame()
+
+    out = evol_df.copy()
+
+    out["CAMPAÑA"] = out["CAMPAÑA"].astype(str)
+    out["CODIGO"] = out.apply(lambda r: _build_entity_code(r, level_mode), axis=1)
+
+    keep_cols = ["TIPO_REF", "CAMPAÑA", "FUNDO", "ETAPA", "CAMPO"]
+    if level_mode == "TURNO":
+        keep_cols.append("TURNO")
+    keep_cols += ["VARIEDAD", "CODIGO", "METRICA", "KG_TOTAL", "AREA_TURNO_UNICA"]
+
+    for c in comp_vars:
+        if c in out.columns:
+            keep_cols.append(c)
+
+    keep_cols = [c for c in keep_cols if c in out.columns]
+    out = out[keep_cols].copy()
+
+    out = out.rename(columns={
+        "TIPO_REF": "TIPO",
+        "METRICA": metric_name,
+        "AREA_TURNO_UNICA": "HA_TURNO_UNICA"
+    })
+
+    campaign_order = _sort_campaign_categories(out["CAMPAÑA"])
+    out["CAMPAÑA"] = pd.Categorical(out["CAMPAÑA"], categories=campaign_order, ordered=True)
+    out = out.sort_values(["TIPO", "CAMPAÑA"]).reset_index(drop=True)
+
+    return out
+
 # --------------------------
 # HELPERS NUEVOS: MAX / MIN
 # --------------------------
@@ -692,10 +801,7 @@ def build_entity_maxmin_summary(
 
         rec = {col: keys[i] for i, col in enumerate(level_cols)}
 
-        if metric_name == "KG/HA":
-            metric_val = ratio_kg_over_unique_turno_area(g)
-        else:
-            metric_val = weighted_mean(g["PESO BAYA (g)"], g["kilogramos"])
+        metric_val = compute_general_metric_value(g, metric_name)
 
         for comp_var in comp_vars:
             if level_mode == "TURNO":
@@ -710,11 +816,11 @@ def build_entity_maxmin_summary(
 
     detail = pd.DataFrame(rows)
     if detail.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), detail
 
     detail = detail.dropna(subset=["METRICA"]).copy()
     if detail.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), detail
 
     detail["CAMPAÑA"] = detail["CAMPAÑA"].astype(str)
     summary_rows = []
@@ -1209,6 +1315,12 @@ with st.sidebar:
     variedad_f = ms("VARIEDAD")
     edad_final_f = ms("EDAD PLANTA FINAL")
 
+    metric_general_pick = st.selectbox(
+        "MÉTRICA",
+        GENERAL_METRIC_OPTIONS,
+        index=0
+    )
+
     sem_min, sem_max = int(df["SEMANA"].min()), int(df["SEMANA"].max())
     smin, smax = st.slider("SEMANA", sem_min, sem_max, (sem_min, sem_max))
 
@@ -1390,46 +1502,29 @@ st.subheader("Boxplots")
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    turn_level = UNIT_COLS_BASE + ["SIEMBRA FINAL", "EDAD PLANTA FINAL"]
+    metric_cfg_box = get_general_metric_config(metric_general_pick)
+    y_metric_label = metric_cfg_box["y_title"]
+
+    st.caption(f"Los tres boxplots responden a la métrica general seleccionada: {y_metric_label}")
 
     b1, b2 = st.columns(2)
 
     with b1:
-        st.caption("Compara SIEMBRA con métrica dinámica: KG/HA o KG/PLANTA.")
-
-        metric_siem_pick = st.selectbox(
-            "Métrica Y para SIEMBRA",
-            ["KG/HA", "KG/PLANTA"],
-            index=0,
-            key="metric_siem_pick"
-        )
-
-        if metric_siem_pick == "KG/HA":
-            agg_turn_siem = aggregate_level(
-                dff, turn_level, "KG/HA", mode="ratio_kg_area_turno"
-            ).rename(columns={"y_val": "METRIC_VAL"})
-        else:
-            agg_turn_siem = aggregate_level(
-                dff, turn_level, "KG/PLANTA", mode="ratio_kg_planta_turno"
-            ).rename(columns={"y_val": "METRIC_VAL"})
-
-        agg_turn_siem["SIEMBRA FINAL"] = agg_turn_siem["SIEMBRA FINAL"].astype(str).str.strip()
-        agg_turn_siem = agg_turn_siem.replace({"SIEMBRA FINAL": {"nan": np.nan, "None": np.nan, "": np.nan}})
-        agg_turn_siem = agg_turn_siem.dropna(subset=["SIEMBRA FINAL", "METRIC_VAL"]).copy()
+        agg_turn_siem = build_boxplot_metric_df(dff, "SIEMBRA FINAL", metric_general_pick)
 
         if agg_turn_siem.empty:
-            st.info("No hay datos suficientes para SIEMBRA.")
+            st.info("No hay datos suficientes para SIEMBRA FINAL.")
         else:
             fig_siem = px.box(
                 agg_turn_siem,
                 x="SIEMBRA FINAL",
                 y="METRIC_VAL",
                 points="outliers",
-                title=f"{metric_siem_pick} por SIEMBRA"
+                title=f"{y_metric_label} por SIEMBRA"
             )
             fig_siem.update_layout(
                 xaxis=dict(type="category", title="SIEMBRA"),
-                yaxis=dict(title=metric_siem_pick)
+                yaxis=dict(title=y_metric_label)
             )
             st.plotly_chart(fig_siem, use_container_width=True)
 
@@ -1438,81 +1533,36 @@ else:
             render_group_descriptive_summary(agg_turn_siem, "SIEMBRA FINAL", "METRIC_VAL")
 
     with b2:
-        agg_turn_kgha = aggregate_level(dff, turn_level, "KG/HA", mode="ratio_kg_area_turno").rename(columns={"y_val": "KG_HA"})
-        agg_turn_kgha = agg_turn_kgha.dropna(subset=["KG_HA"])
+        agg_turn_age = build_boxplot_metric_df(dff, "EDAD PLANTA FINAL", metric_general_pick)
 
-        agg_turn_kgha["EDAD PLANTA FINAL"] = agg_turn_kgha["EDAD PLANTA FINAL"].astype(str)
-        order_age = ["1", "2", "3+"]
-        fig_age = px.box(
-            agg_turn_kgha,
-            x="EDAD PLANTA FINAL",
-            y="KG_HA",
-            category_orders={"EDAD PLANTA FINAL": order_age},
-            points="outliers",
-            title="KG/HA por EDAD"
-        )
-        fig_age.update_layout(
-            xaxis=dict(type="category", title="EDAD"),
-            yaxis=dict(title="KG/HA")
-        )
-        st.plotly_chart(fig_age, use_container_width=True)
+        if agg_turn_age.empty:
+            st.info("No hay datos suficientes para EDAD PLANTA FINAL.")
+        else:
+            order_age = ["1", "2", "3+"]
+            fig_age = px.box(
+                agg_turn_age,
+                x="EDAD PLANTA FINAL",
+                y="METRIC_VAL",
+                category_orders={"EDAD PLANTA FINAL": order_age},
+                points="outliers",
+                title=f"{y_metric_label} por EDAD"
+            )
+            fig_age.update_layout(
+                xaxis=dict(type="category", title="EDAD"),
+                yaxis=dict(title=y_metric_label)
+            )
+            st.plotly_chart(fig_age, use_container_width=True)
 
-        anova_age = analyze_variance_by_group(agg_turn_kgha, "EDAD PLANTA FINAL", "KG_HA")
-        render_variance_metrics(anova_age)
-        render_group_descriptive_summary(agg_turn_kgha, "EDAD PLANTA FINAL", "KG_HA")
-
-    st.divider()
-
-    st.subheader("PESO BAYA")
-
-    agg_turn_peso = aggregate_level(dff, turn_level, "PESO BAYA (g)", mode="weighted_kg").rename(columns={"y_val": "PESO"})
-    agg_turn_peso = agg_turn_peso.dropna(subset=["PESO"])
-
-    fig_peso_siem = px.box(
-        agg_turn_peso,
-        x="SIEMBRA FINAL",
-        y="PESO",
-        points="outliers",
-        title="PESO por SIEMBRA"
-    )
-    fig_peso_siem.update_layout(
-        xaxis=dict(type="category", title="SIEMBRA"),
-        yaxis=dict(title="PESO")
-    )
-    st.plotly_chart(fig_peso_siem, use_container_width=True)
-
-    anova_peso = analyze_variance_by_group(agg_turn_peso, "SIEMBRA FINAL", "PESO")
-    render_variance_metrics(anova_peso)
-    render_group_descriptive_summary(agg_turn_peso, "SIEMBRA FINAL", "PESO")
+            anova_age = analyze_variance_by_group(agg_turn_age, "EDAD PLANTA FINAL", "METRIC_VAL")
+            render_variance_metrics(anova_age)
+            render_group_descriptive_summary(agg_turn_age, "EDAD PLANTA FINAL", "METRIC_VAL")
 
     st.divider()
 
-    # --------------------------
-    # NUEVO BOXPLOT: SEG DENSIDAD
-    # --------------------------
     st.subheader("SEG DENSIDAD")
-    st.caption("Compara SEG DENSIDAD con métrica dinámica: KG/HA o KG/PLANTA.")
+    st.caption(f"Compara SEG DENSIDAD usando la métrica general seleccionada: {y_metric_label}")
 
-    metric_seg_pick = st.selectbox(
-        "Métrica Y para SEG DENSIDAD",
-        ["KG/HA", "KG/PLANTA"],
-        index=0
-    )
-
-    turn_level_seg = UNIT_COLS_BASE + ["SEG DENSIDAD"]
-
-    if metric_seg_pick == "KG/HA":
-        agg_turn_seg = aggregate_level(
-            dff, turn_level_seg, "KG/HA", mode="ratio_kg_area_turno"
-        ).rename(columns={"y_val": "METRIC_VAL"})
-    else:
-        agg_turn_seg = aggregate_level(
-            dff, turn_level_seg, "KG/PLANTA", mode="ratio_kg_planta_turno"
-        ).rename(columns={"y_val": "METRIC_VAL"})
-
-    agg_turn_seg["SEG DENSIDAD"] = agg_turn_seg["SEG DENSIDAD"].astype(str).str.strip()
-    agg_turn_seg = agg_turn_seg.replace({"SEG DENSIDAD": {"nan": np.nan, "None": np.nan, "": np.nan}})
-    agg_turn_seg = agg_turn_seg.dropna(subset=["SEG DENSIDAD", "METRIC_VAL"]).copy()
+    agg_turn_seg = build_boxplot_metric_df(dff, "SEG DENSIDAD", metric_general_pick)
 
     if agg_turn_seg.empty:
         st.info("No hay datos suficientes para SEG DENSIDAD.")
@@ -1522,74 +1572,17 @@ else:
             x="SEG DENSIDAD",
             y="METRIC_VAL",
             points="outliers",
-            title=f"{metric_seg_pick} por SEG DENSIDAD"
+            title=f"{y_metric_label} por SEG DENSIDAD"
         )
         fig_seg.update_layout(
             xaxis=dict(type="category", title="SEG DENSIDAD"),
-            yaxis=dict(title=metric_seg_pick)
+            yaxis=dict(title=y_metric_label)
         )
         st.plotly_chart(fig_seg, use_container_width=True)
 
         anova_seg = analyze_variance_by_group(agg_turn_seg, "SEG DENSIDAD", "METRIC_VAL")
         render_variance_metrics(anova_seg)
         render_group_descriptive_summary(agg_turn_seg, "SEG DENSIDAD", "METRIC_VAL")
-
-    st.divider()
-
-    st.subheader("Biometría")
-    st.caption("Compara SUELO vs MACETA para una variable biométrica.")
-
-    biom_col_pick = st.selectbox(
-        "Variable biométrica",
-        BIOMETRIC_COLS,
-        index=BIOMETRIC_COLS.index("ALTURA_PLANTA_ULT") if "ALTURA_PLANTA_ULT" in BIOMETRIC_COLS else 0
-    )
-
-    bio_left, bio_right = st.columns([0.68, 0.32])
-
-    with bio_left:
-        bio_df = dff[["SIEMBRA FINAL", biom_col_pick]].copy()
-        bio_df["SIEMBRA FINAL"] = bio_df["SIEMBRA FINAL"].astype(str).str.strip().str.upper()
-        bio_df[biom_col_pick] = to_numeric_safe(bio_df[biom_col_pick])
-        bio_df = bio_df[bio_df["SIEMBRA FINAL"].isin(["SUELO", "MACETA"])]
-        bio_df = bio_df.dropna(subset=[biom_col_pick])
-
-        if bio_df.empty:
-            st.info("No hay datos suficientes.")
-        else:
-            fig_bio = px.box(
-                bio_df,
-                x="SIEMBRA FINAL",
-                y=biom_col_pick,
-                points="outliers",
-                title=f"{biom_col_pick} por SIEMBRA"
-            )
-            fig_bio.update_layout(
-                xaxis=dict(type="category", title="SIEMBRA"),
-                yaxis=dict(title=biom_col_pick)
-            )
-            st.plotly_chart(fig_bio, use_container_width=True)
-
-            anova_bio = analyze_variance_by_group(bio_df, "SIEMBRA FINAL", biom_col_pick)
-            render_variance_metrics(anova_bio)
-            render_group_descriptive_summary(bio_df, "SIEMBRA FINAL", biom_col_pick)
-
-    with bio_right:
-        bio_summary = build_siembra_final_biometric_summary(dff, biom_col_pick)
-        if bio_summary.empty:
-            st.info("No hay resumen.")
-        else:
-            st.dataframe(
-                bio_summary.style.format({
-                    "PROMEDIO": "{:,.2f}",
-                    "MEDIANA": "{:,.2f}",
-                    "DESV_STD": "{:,.2f}",
-                    "MIN": "{:,.2f}",
-                    "MAX": "{:,.2f}",
-                    "DELTA": "{:,.2f}",
-                }),
-                use_container_width=True
-            )
 
 st.divider()
 
@@ -1719,258 +1712,161 @@ else:
 st.divider()
 
 # --------------------------
-# NUEVA VISTA: MAX / MIN KG/HA
+# VISTA DINÁMICA: MAX / MIN
 # --------------------------
-st.subheader("MAX / MIN de KG/HA")
-st.caption("Identifica el máximo y mínimo de KG/HA según TURNO o CAMPO. Ahora la visualización se muestra por campaña.")
+st.subheader(f"MAX / MIN de {metric_general_pick}")
+st.caption("Identifica el máximo y mínimo de la métrica seleccionada según TURNO o CAMPO.")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    comp_candidates = get_comparative_candidates(dff)
+    comp_candidates_dyn = get_comparative_candidates(dff)
 
-    kg_left, kg_right = st.columns([0.30, 0.70])
+    mm_left, mm_right = st.columns([0.30, 0.70])
 
-    with kg_left:
-        level_mode_kgha = st.selectbox(
+    with mm_left:
+        level_mode_dyn = st.selectbox(
             "Filtro de análisis",
             ["TURNO", "CAMPO"],
-            key="level_mode_kgha"
+            key="level_mode_dyn"
         )
 
-        default_comp_kgha = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates else comp_candidates[:1]
-        comp_vars_kgha = st.multiselect(
+        default_comp_dyn = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_dyn else comp_candidates_dyn[:1]
+        comp_vars_dyn = st.multiselect(
             "Variables comparativas",
-            comp_candidates,
-            default=default_comp_kgha,
-            key="comp_vars_kgha"
+            comp_candidates_dyn,
+            default=default_comp_dyn,
+            key="comp_vars_dyn"
         )
 
-    with kg_right:
-        if not comp_vars_kgha:
+    with mm_right:
+        if not comp_vars_dyn:
             st.info("Selecciona al menos una variable comparativa.")
         else:
-            summary_kgha, detail_kgha = build_entity_maxmin_summary(
+            summary_dyn, detail_dyn = build_entity_maxmin_summary(
                 dff,
-                level_mode=level_mode_kgha,
-                metric_name="KG/HA",
-                comp_vars=comp_vars_kgha
+                level_mode=level_mode_dyn,
+                metric_name=metric_general_pick,
+                comp_vars=comp_vars_dyn
             )
 
-            if summary_kgha.empty:
-                st.info("No hay datos suficientes para calcular MAX/MIN de KG/HA.")
+            if summary_dyn.empty:
+                st.info(f"No hay datos suficientes para calcular MAX/MIN de {metric_general_pick}.")
             else:
                 fmt_dict = {
-                    "KG/HA": "{:,.4f}",
+                    metric_general_pick: "{:,.4f}",
                     "KG_TOTAL": "{:,.4f}",
                     "HA_TURNO_UNICA": "{:,.4f}",
                 }
-                for comp_var in comp_vars_kgha:
+                for comp_var in comp_vars_dyn:
                     fmt_dict[comp_var] = "{:,.4f}"
 
                 st.dataframe(
-                    summary_kgha.style.format(fmt_dict),
+                    summary_dyn.style.format(fmt_dict),
                     use_container_width=True
                 )
-                render_maxmin_chart(summary_kgha, "KG/HA", comp_vars_kgha, level_mode_kgha)
+                render_maxmin_chart(summary_dyn, metric_general_pick, comp_vars_dyn, level_mode_dyn)
 
 st.divider()
 
 # --------------------------
-# NUEVA VISTA: MAX / MIN PESO
+# VISTA DINÁMICA: EVOLUCIÓN DE MAX/MIN
 # --------------------------
-st.subheader("MAX / MIN de PESO")
-st.caption("Identifica el máximo y mínimo de PESO según TURNO o CAMPO. Esta vista mantiene la misma lógica completa que la de KG/HA y se muestra por campaña.")
-
-if dff.empty:
-    st.warning("No hay datos con los filtros actuales.")
-else:
-    comp_candidates_peso = get_comparative_candidates(dff)
-
-    pe_left, pe_right = st.columns([0.30, 0.70])
-
-    with pe_left:
-        level_mode_peso = st.selectbox(
-            "Filtro de análisis ",
-            ["TURNO", "CAMPO"],
-            key="level_mode_peso"
-        )
-
-        default_comp_peso = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_peso else comp_candidates_peso[:1]
-        comp_vars_peso = st.multiselect(
-            "Variables comparativas ",
-            comp_candidates_peso,
-            default=default_comp_peso,
-            key="comp_vars_peso"
-        )
-
-    with pe_right:
-        if not comp_vars_peso:
-            st.info("Selecciona al menos una variable comparativa.")
-        else:
-            summary_peso, detail_peso = build_entity_maxmin_summary(
-                dff,
-                level_mode=level_mode_peso,
-                metric_name="PESO",
-                comp_vars=comp_vars_peso
-            )
-
-            if summary_peso.empty:
-                st.info("No hay datos suficientes para calcular MAX/MIN de PESO.")
-            else:
-                fmt_dict = {
-                    "PESO": "{:,.4f}",
-                    "KG_TOTAL": "{:,.4f}",
-                    "HA_TURNO_UNICA": "{:,.4f}",
-                }
-                for comp_var in comp_vars_peso:
-                    fmt_dict[comp_var] = "{:,.4f}"
-
-                st.dataframe(
-                    summary_peso.style.format(fmt_dict),
-                    use_container_width=True
-                )
-                render_maxmin_chart(summary_peso, "PESO", comp_vars_peso, level_mode_peso)
-
-st.divider()
-
-# --------------------------
-# NUEVA VISTA: EVOLUCIÓN DE MAX/MIN KG/HA
-# --------------------------
-st.subheader("EVOLUCIÓN DE MAX/MIN KG/HA")
+st.subheader(f"EVOLUCIÓN DE MAX/MIN DE {metric_general_pick}")
 st.caption("Toma una campaña como referencia, identifica su MAX y MIN, y sigue esos mismos elementos hacia atrás y hacia adelante en las demás campañas.")
 
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
-    comp_candidates_ev_kgha = get_comparative_candidates(dff)
-    campaign_options_ev_kgha = _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
+    comp_candidates_ev_dyn = get_comparative_candidates(dff)
+    campaign_options_ev_dyn = _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
 
-    evk_left, evk_right = st.columns([0.30, 0.70])
+    ev_left, ev_right = st.columns([0.30, 0.70])
 
-    with evk_left:
-        level_mode_ev_kgha = st.selectbox(
-            "Filtro de análisis  ",
+    with ev_left:
+        level_mode_ev_dyn = st.selectbox(
+            "Filtro de análisis ",
             ["TURNO", "CAMPO"],
-            key="level_mode_ev_kgha"
+            key="level_mode_ev_dyn"
         )
 
-        default_comp_ev_kgha = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_ev_kgha else comp_candidates_ev_kgha[:1]
-        comp_vars_ev_kgha = st.multiselect(
-            "Variables comparativas  ",
-            comp_candidates_ev_kgha,
-            default=default_comp_ev_kgha,
-            key="comp_vars_ev_kgha"
+        default_comp_ev_dyn = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_ev_dyn else comp_candidates_ev_dyn[:1]
+        comp_vars_ev_dyn = st.multiselect(
+            "Variables comparativas ",
+            comp_candidates_ev_dyn,
+            default=default_comp_ev_dyn,
+            key="comp_vars_ev_dyn"
         )
 
-        campaign_anchor_kgha = st.selectbox(
+        campaign_anchor_dyn = st.selectbox(
             "CAMPAÑA:",
-            campaign_options_ev_kgha,
-            index=len(campaign_options_ev_kgha) - 1 if campaign_options_ev_kgha else 0,
-            key="campaign_anchor_kgha"
+            campaign_options_ev_dyn,
+            index=len(campaign_options_ev_dyn) - 1 if campaign_options_ev_dyn else 0,
+            key="campaign_anchor_dyn"
         )
 
-    with evk_right:
-        if not comp_vars_ev_kgha:
+    with ev_right:
+        if not comp_vars_ev_dyn:
             st.info("Selecciona al menos una variable comparativa.")
-        elif not campaign_anchor_kgha:
+        elif not campaign_anchor_dyn:
             st.info("Selecciona una campaña base.")
         else:
-            summary_base_kgha, evol_kgha, detail_all_kgha = build_evolution_maxmin_summary(
+            summary_base_dyn, evol_dyn, detail_all_dyn = build_evolution_maxmin_summary(
                 dff,
-                level_mode=level_mode_ev_kgha,
-                metric_name="KG/HA",
-                comp_vars=comp_vars_ev_kgha,
-                campaign_anchor=campaign_anchor_kgha
+                level_mode=level_mode_ev_dyn,
+                metric_name=metric_general_pick,
+                comp_vars=comp_vars_ev_dyn,
+                campaign_anchor=campaign_anchor_dyn
             )
 
-            if summary_base_kgha.empty or evol_kgha.empty:
-                st.info("No hay datos suficientes para calcular la evolución de MAX/MIN de KG/HA.")
+            if summary_base_dyn.empty or evol_dyn.empty:
+                st.info(f"No hay datos suficientes para calcular la evolución de MAX/MIN de {metric_general_pick}.")
             else:
-                fmt_dict = {
-                    "KG/HA": "{:,.4f}",
+                fmt_dict_base = {
+                    metric_general_pick: "{:,.4f}",
                     "KG_TOTAL": "{:,.4f}",
                     "HA_TURNO_UNICA": "{:,.4f}",
                 }
-                for comp_var in comp_vars_ev_kgha:
-                    fmt_dict[comp_var] = "{:,.4f}"
+                for comp_var in comp_vars_ev_dyn:
+                    fmt_dict_base[comp_var] = "{:,.4f}"
 
-                st.markdown(f"**Base seleccionada en campaña {campaign_anchor_kgha}**")
+                st.markdown(f"**Base seleccionada en campaña {campaign_anchor_dyn}**")
                 st.dataframe(
-                    summary_base_kgha.style.format(fmt_dict),
+                    summary_base_dyn.style.format(fmt_dict_base),
                     use_container_width=True
                 )
-                render_evolution_chart(summary_base_kgha, evol_kgha, "KG/HA", comp_vars_ev_kgha, level_mode_ev_kgha, campaign_anchor_kgha)
 
-st.divider()
-
-# --------------------------
-# NUEVA VISTA: EVOLUCIÓN DE MAX/MIN DE PESO (G)
-# --------------------------
-st.subheader("EVOLUCIÓN DE MAX/MIN DE PESO (G)")
-st.caption("Toma una campaña como referencia, identifica su MAX y MIN de PESO, y sigue esos mismos elementos hacia atrás y hacia adelante en las demás campañas.")
-
-if dff.empty:
-    st.warning("No hay datos con los filtros actuales.")
-else:
-    comp_candidates_ev_peso = get_comparative_candidates(dff)
-    campaign_options_ev_peso = _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
-
-    evp_left, evp_right = st.columns([0.30, 0.70])
-
-    with evp_left:
-        level_mode_ev_peso = st.selectbox(
-            "Filtro de análisis   ",
-            ["TURNO", "CAMPO"],
-            key="level_mode_ev_peso"
-        )
-
-        default_comp_ev_peso = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_ev_peso else comp_candidates_ev_peso[:1]
-        comp_vars_ev_peso = st.multiselect(
-            "Variables comparativas   ",
-            comp_candidates_ev_peso,
-            default=default_comp_ev_peso,
-            key="comp_vars_ev_peso"
-        )
-
-        campaign_anchor_peso = st.selectbox(
-            "CAMPAÑA: ",
-            campaign_options_ev_peso,
-            index=len(campaign_options_ev_peso) - 1 if campaign_options_ev_peso else 0,
-            key="campaign_anchor_peso"
-        )
-
-    with evp_right:
-        if not comp_vars_ev_peso:
-            st.info("Selecciona al menos una variable comparativa.")
-        elif not campaign_anchor_peso:
-            st.info("Selecciona una campaña base.")
-        else:
-            summary_base_peso, evol_peso, detail_all_peso = build_evolution_maxmin_summary(
-                dff,
-                level_mode=level_mode_ev_peso,
-                metric_name="PESO",
-                comp_vars=comp_vars_ev_peso,
-                campaign_anchor=campaign_anchor_peso
-            )
-
-            if summary_base_peso.empty or evol_peso.empty:
-                st.info("No hay datos suficientes para calcular la evolución de MAX/MIN de PESO.")
-            else:
-                fmt_dict = {
-                    "PESO": "{:,.4f}",
-                    "KG_TOTAL": "{:,.4f}",
-                    "HA_TURNO_UNICA": "{:,.4f}",
-                }
-                for comp_var in comp_vars_ev_peso:
-                    fmt_dict[comp_var] = "{:,.4f}"
-
-                st.markdown(f"**Base seleccionada en campaña {campaign_anchor_peso}**")
-                st.dataframe(
-                    summary_base_peso.style.format(fmt_dict),
-                    use_container_width=True
+                st.markdown("**Evolución completa en tabla**")
+                evol_table = build_evolution_detail_table(
+                    evol_df=evol_dyn,
+                    metric_name=metric_general_pick,
+                    comp_vars=comp_vars_ev_dyn,
+                    level_mode=level_mode_ev_dyn
                 )
-                render_evolution_chart(summary_base_peso, evol_peso, "PESO", comp_vars_ev_peso, level_mode_ev_peso, campaign_anchor_peso)
+
+                if not evol_table.empty:
+                    fmt_dict_evol = {
+                        metric_general_pick: "{:,.4f}",
+                        "KG_TOTAL": "{:,.4f}",
+                        "HA_TURNO_UNICA": "{:,.4f}",
+                    }
+                    for comp_var in comp_vars_ev_dyn:
+                        if comp_var in evol_table.columns:
+                            fmt_dict_evol[comp_var] = "{:,.4f}"
+
+                    st.dataframe(
+                        evol_table.style.format(fmt_dict_evol),
+                        use_container_width=True
+                    )
+
+                render_evolution_chart(
+                    summary_base_dyn,
+                    evol_dyn,
+                    metric_general_pick,
+                    comp_vars_ev_dyn,
+                    level_mode_ev_dyn,
+                    campaign_anchor_dyn
+                )
 
 st.divider()
 
