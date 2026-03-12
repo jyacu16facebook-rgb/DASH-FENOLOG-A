@@ -18,7 +18,7 @@ from scipy.stats import pearsonr, shapiro, levene, f_oneway, kruskal
 st.set_page_config(page_title="Fenología vs rendimiento", layout="wide")
 
 REQ_SHEET = "DATA"
-DATA_FILE = "CONSOLIDADO 2022-2026.xlsx"
+DATA_FILE = "CONSOLIDADO 2022-2026.xlsb"
 
 COLS_REQUIRED = [
     "AÑO", "CAMPAÑA", "SEMANA", "FUNDO", "ETAPA", "CAMPO", "TURNO", "VARIEDAD",
@@ -123,7 +123,7 @@ def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def read_excel_path(path: str, sheet: str) -> pd.DataFrame:
-    return pd.read_excel(path, sheet_name=sheet)
+    return pd.read_excel(path, sheet_name=sheet, engine="pyxlsb")
 
 def validate_cols(df: pd.DataFrame) -> list:
     return [c for c in COLS_REQUIRED if c not in df.columns]
@@ -1162,7 +1162,7 @@ def render_evolution_chart(base_df: pd.DataFrame, evol_df: pd.DataFrame, metric_
             if pd.isna(metric_val):
                 continue
 
-            entity_code = _build_entity_code(r, level_mode)
+                entity_code = _build_entity_code(r, level_mode)
             x_vals.append(str(r["CAMPAÑA"]))
             y_vals.append(metric_val)
             text_vals.append(f"{entity_code}<br>{metric_val:,.0f}")
