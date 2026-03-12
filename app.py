@@ -1162,7 +1162,7 @@ def render_evolution_chart(base_df: pd.DataFrame, evol_df: pd.DataFrame, metric_
             if pd.isna(metric_val):
                 continue
 
-                entity_code = _build_entity_code(r, level_mode)
+            entity_code = _build_entity_code(r, level_mode)
             x_vals.append(str(r["CAMPAÑA"]))
             y_vals.append(metric_val)
             text_vals.append(f"{entity_code}<br>{metric_val:,.0f}")
@@ -1721,6 +1721,7 @@ if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
     comp_candidates_dyn = get_comparative_candidates(dff)
+    campaign_options_mm_dyn = ["TODAS"] + _sort_campaign_categories(dff["CAMPAÑA"].astype(str))
 
     mm_left, mm_right = st.columns([0.30, 0.70])
 
@@ -1729,6 +1730,13 @@ else:
             "Filtro de análisis",
             ["TURNO", "CAMPO"],
             key="level_mode_dyn"
+        )
+
+        campaign_filter_dyn = st.selectbox(
+            "CAMPAÑA",
+            campaign_options_mm_dyn,
+            index=0,
+            key="campaign_filter_dyn"
         )
 
         default_comp_dyn = ["BROTES TOTALES"] if "BROTES TOTALES" in comp_candidates_dyn else comp_candidates_dyn[:1]
@@ -1749,6 +1757,9 @@ else:
                 metric_name=metric_general_pick,
                 comp_vars=comp_vars_dyn
             )
+
+            if campaign_filter_dyn != "TODAS" and not summary_dyn.empty:
+                summary_dyn = summary_dyn[summary_dyn["CAMPAÑA"].astype(str) == str(campaign_filter_dyn)].copy()
 
             if summary_dyn.empty:
                 st.info(f"No hay datos suficientes para calcular MAX/MIN de {metric_general_pick}.")
