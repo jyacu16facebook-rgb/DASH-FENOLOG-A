@@ -136,6 +136,7 @@ def validate_cols(df: pd.DataFrame) -> list:
 
 def apply_filters(df: pd.DataFrame,
                   camp, fundo, etapa, campo, turno, variedad, edad_final,
+                  siembra_final, seg_densidad,
                   semana_min, semana_max):
     dff = df.copy()
 
@@ -153,6 +154,10 @@ def apply_filters(df: pd.DataFrame,
         dff = dff[dff["VARIEDAD"].isin(variedad)]
     if edad_final:
         dff = dff[dff["EDAD PLANTA FINAL"].isin(edad_final)]
+    if siembra_final:
+        dff = dff[dff["SIEMBRA FINAL"].isin(siembra_final)]
+    if seg_densidad:
+        dff = dff[dff["SEG DENSIDAD"].isin(seg_densidad)]
 
     dff = dff[(dff["SEMANA"] >= semana_min) & (dff["SEMANA"] <= semana_max)]
     return dff
@@ -1322,6 +1327,8 @@ with st.sidebar:
     turno_f = ms("TURNO")
     variedad_f = ms("VARIEDAD")
     edad_final_f = ms("EDAD PLANTA FINAL")
+    siembra_final_f = ms("SIEMBRA FINAL")
+    seg_densidad_f = ms("SEG DENSIDAD")
 
     metric_general_pick = st.selectbox(
         "MÉTRICA",
@@ -1332,7 +1339,12 @@ with st.sidebar:
     sem_min, sem_max = int(df["SEMANA"].min()), int(df["SEMANA"].max())
     smin, smax = st.slider("SEMANA", sem_min, sem_max, (sem_min, sem_max))
 
-dff = apply_filters(df, camp_f, fundo_f, etapa_f, campo_f, turno_f, variedad_f, edad_final_f, smin, smax)
+dff = apply_filters(
+    df,
+    camp_f, fundo_f, etapa_f, campo_f, turno_f, variedad_f, edad_final_f,
+    siembra_final_f, seg_densidad_f,
+    smin, smax
+)
 
 # --------------------------
 # RESUMEN
