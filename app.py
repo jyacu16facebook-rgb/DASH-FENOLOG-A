@@ -73,14 +73,42 @@ CORR_COLS = [
     "EDAD PLANTA",
 ]
 
-BIOMETRIC_COLS = [
-    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES",
-    "EDAD PLANTA", "EDAD PLANTA FINAL",
-    "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
-    "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
-    "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
-    "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
+# SOLO las variables que tú definiste para el nuevo filtro de estructura fenológica
+STRUCTURE_PHENO_COLS = [
+    "MADERAS PRINCIPALES",
+    "CORTES",
+    "BROTES TOTALES",
+    "TERMINALES",
+    "BP_N_BROTES_ULT",
+    "BP_LONG_ULT",
+    "BP_DIAM_ULT",
+    "BS_N_BROTES_ULT",
+    "BS_LONG_ULT",
+    "BS_DIAM_ULT",
+    "BT_N_BROTES_ULT",
+    "BT_LONG_ULT",
+    "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT",
+    "ANCHO_PLANTA_ULT"
 ]
+
+STRUCTURE_UNIT_MAP = {
+    "MADERAS PRINCIPALES": "CONTEO",
+    "CORTES": "CONTEO",
+    "BROTES TOTALES": "CONTEO",
+    "TERMINALES": "CONTEO",
+    "BP_N_BROTES_ULT": "CONTEO",
+    "BP_LONG_ULT": "(cm)",
+    "BP_DIAM_ULT": "(mm)",
+    "BS_N_BROTES_ULT": "CONTEO",
+    "BS_LONG_ULT": "(cm)",
+    "BS_DIAM_ULT": "(mm)",
+    "BT_N_BROTES_ULT": "CONTEO",
+    "BT_LONG_ULT": "(cm)",
+    "BT_DIAM_ULT": "(mm)",
+    "ALTURA_PLANTA_ULT": "(cm)",
+    "ANCHO_PLANTA_ULT": "(cm)",
+}
 
 SUM_X_COLS = [
     "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
@@ -126,6 +154,14 @@ def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
         order = ["1", "2", "3+"]
         df["EDAD PLANTA FINAL"] = pd.Categorical(df["EDAD PLANTA FINAL"], categories=order, ordered=True)
     return df
+
+def structure_axis_label(col_name: str) -> str:
+    unit = STRUCTURE_UNIT_MAP.get(col_name, "")
+    if not unit:
+        return col_name
+    if unit.startswith("("):
+        return f"{col_name} {unit}"
+    return f"{col_name} ({unit})"
 
 @st.cache_data(show_spinner=False)
 def read_excel_path(path: str, sheet: str) -> pd.DataFrame:
@@ -370,43 +406,6 @@ def compute_kg_planta_campaign(df: pd.DataFrame) -> pd.DataFrame:
     out["CAMPAÑA"] = pd.Categorical(out["CAMPAÑA"], categories=_sort_campaign_categories(out["CAMPAÑA"]), ordered=True)
     return out.sort_values("CAMPAÑA").reset_index(drop=True)
 
-def build_siembra_final_biometric_summary(dff: pd.DataFrame, metric_col: str) -> pd.DataFrame:
-    cols_needed = ["SIEMBRA FINAL", metric_col]
-    if dff.empty or any(c not in dff.columns for c in cols_needed):
-        return pd.DataFrame()
-
-    tmp = dff[cols_needed].copy()
-    tmp["SIEMBRA FINAL"] = tmp["SIEMBRA FINAL"].astype(str).str.strip().str.upper()
-    tmp = tmp[tmp["SIEMBRA FINAL"].isin(["SUELO", "MACETA"])]
-    tmp[metric_col] = to_numeric_safe(tmp[metric_col])
-    tmp = tmp.dropna(subset=[metric_col])
-
-    if tmp.empty:
-        return pd.DataFrame()
-
-    summary = (
-        tmp.groupby("SIEMBRA FINAL")[metric_col]
-        .agg(["count", "mean", "median", "std", "min", "max"])
-        .reset_index()
-        .rename(columns={
-            "count": "N",
-            "mean": "PROMEDIO",
-            "median": "MEDIANA",
-            "std": "DESV_STD",
-            "min": "MIN",
-            "max": "MAX"
-        })
-    )
-
-    prom_suelo = summary.loc[summary["SIEMBRA FINAL"] == "SUELO", "PROMEDIO"]
-    prom_maceta = summary.loc[summary["SIEMBRA FINAL"] == "MACETA", "PROMEDIO"]
-    delta = np.nan
-    if not prom_suelo.empty and not prom_maceta.empty:
-        delta = float(prom_suelo.iloc[0] - prom_maceta.iloc[0])
-
-    summary["DELTA"] = delta
-    return summary
-
 def compute_full_dynamic_axis_range(series: pd.Series, lower_zero: bool = True):
     s = pd.to_numeric(series, errors="coerce").dropna()
     if s.empty:
@@ -470,7 +469,7 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
         return out
 
     grouped = []
-    for gname, gdf in tmp.groupby(group_col, dropna=False):
+    for _, gdf in tmp.groupby(group_col, dropna=False):
         vals = pd.to_numeric(gdf[value_col], errors="coerce").dropna().values
         if len(vals) > 0:
             grouped.append(vals)
@@ -574,8 +573,10 @@ def render_variance_metrics(result: dict):
         card("Grupos", f"{int(result.get('grupos', 0))}")
 
 def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
+    cols_out = ["GRUPO", "N", "MEDIA", "DESV_STD", "CV(%)"]
+
     if df_plot.empty or group_col not in df_plot.columns or value_col not in df_plot.columns:
-        return pd.DataFrame(columns=["GRUPO", "MEDIA", "DESV_STD", "CV(%)"])
+        return pd.DataFrame(columns=cols_out)
 
     tmp = df_plot[[group_col, value_col]].copy()
     tmp[group_col] = tmp[group_col].astype(str).str.strip()
@@ -584,20 +585,22 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
     tmp = tmp.dropna(subset=[group_col, value_col]).copy()
 
     if tmp.empty:
-        return pd.DataFrame(columns=["GRUPO", "MEDIA", "DESV_STD", "CV(%)"])
+        return pd.DataFrame(columns=cols_out)
 
     desc = (
         tmp.groupby(group_col, dropna=False)[value_col]
-        .agg(["mean", "std"])
+        .agg(["count", "mean", "std"])
         .reset_index()
         .rename(columns={
             group_col: "GRUPO",
+            "count": "N",
             "mean": "MEDIA",
             "std": "DESV_STD"
         })
     )
 
     desc["DESV_STD"] = desc["DESV_STD"].fillna(0)
+    desc["N"] = desc["N"].fillna(0).astype(int)
 
     desc["CV_VAL"] = np.where(
         desc["MEDIA"].abs() > 0,
@@ -611,7 +614,7 @@ def build_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value
 
     desc = desc.sort_values("MEDIA", ascending=False).reset_index(drop=True)
 
-    return desc[["GRUPO", "MEDIA", "DESV_STD", "CV(%)"]]
+    return desc[cols_out]
 
 def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, value_col: str):
     desc = build_group_descriptive_summary(df_plot, group_col, value_col)
@@ -621,6 +624,7 @@ def render_group_descriptive_summary(df_plot: pd.DataFrame, group_col: str, valu
 
     st.dataframe(
         desc.style.format({
+            "N": "{:,.0f}",
             "MEDIA": "{:,.4f}",
             "DESV_STD": "{:,.4f}",
         }),
@@ -685,6 +689,32 @@ def build_boxplot_metric_df(dff: pd.DataFrame, group_col: str, metric_name: str)
         cfg["source_col"],
         mode=cfg["agg_mode"]
     ).rename(columns={"y_val": "METRIC_VAL"})
+
+    agg_df[group_col] = agg_df[group_col].astype(str).str.strip()
+    agg_df = agg_df.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
+    agg_df = agg_df.dropna(subset=[group_col, "METRIC_VAL"]).copy()
+
+    return agg_df
+
+def build_structure_boxplot_df(dff: pd.DataFrame, group_col: str, metric_col: str) -> pd.DataFrame:
+    if dff.empty or group_col not in dff.columns or metric_col not in dff.columns:
+        return pd.DataFrame(columns=UNIT_COLS_BASE + [group_col, "METRIC_VAL"])
+
+    tmp = dff[UNIT_COLS_BASE + [group_col, metric_col]].copy()
+    tmp[group_col] = tmp[group_col].astype(str).str.strip()
+    tmp = tmp.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
+
+    tmp["METRIC_VAL"] = pd.to_numeric(tmp[metric_col], errors="coerce")
+    tmp = tmp.dropna(subset=[group_col, "METRIC_VAL"]).copy()
+
+    if tmp.empty:
+        return pd.DataFrame(columns=UNIT_COLS_BASE + [group_col, "METRIC_VAL"])
+
+    agg_df = (
+        tmp.groupby(UNIT_COLS_BASE + [group_col], dropna=False)["METRIC_VAL"]
+        .mean()
+        .reset_index()
+    )
 
     agg_df[group_col] = agg_df[group_col].astype(str).str.strip()
     agg_df = agg_df.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
@@ -1298,7 +1328,7 @@ num_main = [
     "Ha COSECHADA", "Ha TURNO", "KG/HA", "DENSIDAD", "FRUTO MADURO", "FRUTO ROSADO", "FRUTO CREMOSO",
     "PESO BAYA (g)", "PESO BAYA CREMOSO (g)", "CALIBRE BAYA (mm)", "CALIBRE CREMOSO (mm)",
     "SEMANA DE SIEMBRA",
-    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA",
+    "MADERAS PRINCIPALES", "CORTES", "BROTES TOTALES", "TERMINALES", "EDAD PLANTA", "EDAD PLANTA FINAL",
     "BP_N_BROTES_ULT", "BP_LONG_ULT", "BP_DIAM_ULT",
     "BS_N_BROTES_ULT", "BS_LONG_ULT", "BS_DIAM_ULT",
     "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
@@ -1522,10 +1552,50 @@ st.subheader("Boxplots")
 if dff.empty:
     st.warning("No hay datos con los filtros actuales.")
 else:
+    # ---------------------------------------------------
+    # NUEVO: BOXPLOT DE ESTRUCTURA FENOLÓGICA POR SIEMBRA
+    # ---------------------------------------------------
+    st.markdown("### Estructura fenológica por SIEMBRA")
+    bio_left, bio_right = st.columns([0.28, 0.72])
+
+    with bio_left:
+        structure_pick = st.selectbox(
+            "Estructura fenológica",
+            STRUCTURE_PHENO_COLS,
+            index=0,
+            key="structure_pick_box"
+        )
+        structure_y_label = structure_axis_label(structure_pick)
+
+    with bio_right:
+        agg_structure_siem = build_structure_boxplot_df(dff, "SIEMBRA FINAL", structure_pick)
+
+        if agg_structure_siem.empty:
+            st.info("No hay datos suficientes para la estructura fenológica seleccionada por SIEMBRA FINAL.")
+        else:
+            fig_structure_siem = px.box(
+                agg_structure_siem,
+                x="SIEMBRA FINAL",
+                y="METRIC_VAL",
+                points="outliers",
+                title=f"{structure_y_label} por SIEMBRA"
+            )
+            fig_structure_siem.update_layout(
+                xaxis=dict(type="category", title="SIEMBRA"),
+                yaxis=dict(title=structure_y_label)
+            )
+            st.plotly_chart(fig_structure_siem, use_container_width=True)
+
+            anova_structure_siem = analyze_variance_by_group(agg_structure_siem, "SIEMBRA FINAL", "METRIC_VAL")
+            render_variance_metrics(anova_structure_siem)
+            render_group_descriptive_summary(agg_structure_siem, "SIEMBRA FINAL", "METRIC_VAL")
+
+    st.divider()
+
     metric_cfg_box = get_general_metric_config(metric_general_pick)
     y_metric_label = metric_cfg_box["y_title"]
 
-    st.caption(f"Los tres boxplots responden a la métrica general seleccionada: {y_metric_label}")
+    st.caption(f"Los siguientes boxplots responden a la métrica general seleccionada: {y_metric_label}")
 
     b1, b2 = st.columns(2)
 
