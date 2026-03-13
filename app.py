@@ -50,11 +50,32 @@ METRIC_Y_OPTIONS = {
     "CALIBRE BAYA (mm)": "CALIBRE BAYA (mm)",
 }
 
+# --------------------------
+# NUEVO: MÉTRICAS AMPLIADAS
+# --------------------------
+STRUCTURE_METRIC_OPTIONS = {
+    "MADERAS PRINCIPALES (CONTEO)": "MADERAS PRINCIPALES",
+    "CORTES (CONTEO)": "CORTES",
+    "BROTES TOTALES (CONTEO)": "BROTES TOTALES",
+    "TERMINALES (CONTEO)": "TERMINALES",
+    "BP_N_BROTES_ULT (CONTEO)": "BP_N_BROTES_ULT",
+    "BP_LONG_ULT (cm)": "BP_LONG_ULT",
+    "BP_DIAM_ULT (mm)": "BP_DIAM_ULT",
+    "BS_N_BROTES_ULT (CONTEO)": "BS_N_BROTES_ULT",
+    "BS_LONG_ULT (cm)": "BS_LONG_ULT",
+    "BS_DIAM_ULT (mm)": "BS_DIAM_ULT",
+    "BT_N_BROTES_ULT (CONTEO)": "BT_N_BROTES_ULT",
+    "BT_LONG_ULT (cm)": "BT_LONG_ULT",
+    "BT_DIAM_ULT (mm)": "BT_DIAM_ULT",
+    "ALTURA_PLANTA_ULT (cm)": "ALTURA_PLANTA_ULT",
+    "ANCHO_PLANTA_ULT (cm)": "ANCHO_PLANTA_ULT",
+}
+
 GENERAL_METRIC_OPTIONS = [
     "KG/HA",
     "KG/PLANTA",
     "PESO BAYA (g)",
-]
+] + list(STRUCTURE_METRIC_OPTIONS.keys())
 
 CORR_COLS = [
     "KG/HA",
@@ -81,43 +102,6 @@ BIOMETRIC_COLS = [
     "BT_N_BROTES_ULT", "BT_LONG_ULT", "BT_DIAM_ULT",
     "ALTURA_PLANTA_ULT", "ANCHO_PLANTA_ULT"
 ]
-
-# NUEVO: filtro estructura de variables (solo las que pediste con sus unidades)
-STRUCTURE_VAR_OPTIONS = [
-    "MADERAS PRINCIPALES",
-    "CORTES",
-    "BROTES TOTALES",
-    "TERMINALES",
-    "BP_N_BROTES_ULT",
-    "BP_LONG_ULT",
-    "BP_DIAM_ULT",
-    "BS_N_BROTES_ULT",
-    "BS_LONG_ULT",
-    "BS_DIAM_ULT",
-    "BT_N_BROTES_ULT",
-    "BT_LONG_ULT",
-    "BT_DIAM_ULT",
-    "ALTURA_PLANTA_ULT",
-    "ANCHO_PLANTA_ULT",
-]
-
-STRUCTURE_VAR_UNITS = {
-    "MADERAS PRINCIPALES": "CONTEO",
-    "CORTES": "CONTEO",
-    "BROTES TOTALES": "CONTEO",
-    "TERMINALES": "CONTEO",
-    "BP_N_BROTES_ULT": "CONTEO",
-    "BP_LONG_ULT": "(cm)",
-    "BP_DIAM_ULT": "(mm)",
-    "BS_N_BROTES_ULT": "CONTEO",
-    "BS_LONG_ULT": "(cm)",
-    "BS_DIAM_ULT": "(mm)",
-    "BT_N_BROTES_ULT": "CONTEO",
-    "BT_LONG_ULT": "(cm)",
-    "BT_DIAM_ULT": "(mm)",
-    "ALTURA_PLANTA_ULT": "(cm)",
-    "ANCHO_PLANTA_ULT": "(cm)",
-}
 
 SUM_X_COLS = [
     "FLORES", "FRUTO CUAJADO", "FRUTO VERDE", "TOTAL DE FRUTOS",
@@ -163,12 +147,6 @@ def ensure_categories_age(df: pd.DataFrame) -> pd.DataFrame:
         order = ["1", "2", "3+"]
         df["EDAD PLANTA FINAL"] = pd.Categorical(df["EDAD PLANTA FINAL"], categories=order, ordered=True)
     return df
-
-def get_structure_var_label(var_name: str) -> str:
-    unit = STRUCTURE_VAR_UNITS.get(var_name, "")
-    if unit:
-        return f"{var_name} {unit}"
-    return var_name
 
 @st.cache_data(show_spinner=False)
 def read_excel_path(path: str, sheet: str) -> pd.DataFrame:
@@ -313,6 +291,8 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
             rec["y_val"] = weighted_mean(g[y_col], g[W_COL])
         elif mode == "weighted_kg":
             rec["y_val"] = weighted_mean(g[y_col], g["kilogramos"])
+        elif mode == "weighted_turno":
+            rec["y_val"] = weighted_mean(g[y_col], g["Ha TURNO"])
         elif mode == "ratio_kg_area_turno":
             rec["y_val"] = ratio_kg_over_unique_turno_area(g)
         elif mode == "ratio_kg_planta_turno":
@@ -321,25 +301,6 @@ def aggregate_level(df: pd.DataFrame, level_cols: list, y_col: str, mode: str = 
             rec["y_val"] = np.nan
 
         rec["w_sum"] = sum_numeric(g[W_COL])
-        rec["kg_sum"] = sum_numeric(g["kilogramos"])
-        rec["area_sum"] = unique_turno_area_sum(g)
-        rows.append(rec)
-
-    return pd.DataFrame(rows)
-
-# NUEVO: promedio ponderado por Ha TURNO para la vista de SIEMBRA
-def aggregate_level_weighted_turno(df: pd.DataFrame, level_cols: list, y_col: str) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=level_cols + ["y_val", "w_sum", "kg_sum", "area_sum"])
-
-    rows = []
-    for keys, g in df.groupby(level_cols, dropna=False):
-        if not isinstance(keys, tuple):
-            keys = (keys,)
-        rec = {col: keys[i] for i, col in enumerate(level_cols)}
-
-        rec["y_val"] = weighted_mean(g[y_col], g["Ha TURNO"])
-        rec["w_sum"] = sum_numeric(g["Ha TURNO"])
         rec["kg_sum"] = sum_numeric(g["kilogramos"])
         rec["area_sum"] = unique_turno_area_sum(g)
         rows.append(rec)
@@ -532,7 +493,7 @@ def analyze_variance_by_group(df_plot: pd.DataFrame, group_col: str, value_col: 
         return out
 
     grouped = []
-    for gname, gdf in tmp.groupby(group_col, dropna=False):
+    for _, gdf in tmp.groupby(group_col, dropna=False):
         vals = pd.to_numeric(gdf[value_col], errors="coerce").dropna().values
         if len(vals) > 0:
             grouped.append(vals)
@@ -718,6 +679,14 @@ def get_general_metric_config(metric_name: str) -> dict:
             "y_title": "PESO BAYA (g)"
         }
 
+    if metric_name in STRUCTURE_METRIC_OPTIONS:
+        return {
+            "metric_name": metric_name,
+            "source_col": STRUCTURE_METRIC_OPTIONS[metric_name],
+            "agg_mode": "weighted_turno",
+            "y_title": metric_name
+        }
+
     return {
         "metric_name": "KG/HA",
         "source_col": "KG/HA",
@@ -726,16 +695,27 @@ def get_general_metric_config(metric_name: str) -> dict:
     }
 
 def compute_general_metric_value(df_subset: pd.DataFrame, metric_name: str) -> float:
-    metric_name = str(metric_name).strip()
+    cfg = get_general_metric_config(metric_name)
+    source_col = cfg["source_col"]
+    agg_mode = cfg["agg_mode"]
 
-    if metric_name == "KG/HA":
+    if agg_mode == "ratio_kg_area_turno":
         return ratio_kg_over_unique_turno_area(df_subset)
 
-    if metric_name == "KG/PLANTA":
+    if agg_mode == "ratio_kg_planta_turno":
         return ratio_kg_planta_over_unique_turno(df_subset)
 
-    if metric_name == "PESO BAYA (g)":
-        return weighted_mean(df_subset["PESO BAYA (g)"], df_subset["kilogramos"])
+    if agg_mode == "weighted_kg":
+        return weighted_mean(df_subset[source_col], df_subset["kilogramos"])
+
+    if agg_mode == "weighted_turno":
+        return weighted_mean(df_subset[source_col], df_subset["Ha TURNO"])
+
+    if agg_mode == "weighted":
+        return weighted_mean(df_subset[source_col], df_subset[W_COL])
+
+    if agg_mode == "simple":
+        return simple_mean(df_subset[source_col])
 
     return np.nan
 
@@ -748,22 +728,6 @@ def build_boxplot_metric_df(dff: pd.DataFrame, group_col: str, metric_name: str)
         level_cols,
         cfg["source_col"],
         mode=cfg["agg_mode"]
-    ).rename(columns={"y_val": "METRIC_VAL"})
-
-    agg_df[group_col] = agg_df[group_col].astype(str).str.strip()
-    agg_df = agg_df.replace({group_col: {"nan": np.nan, "None": np.nan, "": np.nan}})
-    agg_df = agg_df.dropna(subset=[group_col, "METRIC_VAL"]).copy()
-
-    return agg_df
-
-# NUEVO: dataframe para boxplot SIEMBRA usando variable estructural y ponderado por Ha TURNO
-def build_boxplot_structure_df(dff: pd.DataFrame, group_col: str, metric_col: str) -> pd.DataFrame:
-    level_cols = UNIT_COLS_BASE + [group_col]
-
-    agg_df = aggregate_level_weighted_turno(
-        dff,
-        level_cols,
-        metric_col
     ).rename(columns={"y_val": "METRIC_VAL"})
 
     agg_df[group_col] = agg_df[group_col].astype(str).str.strip()
@@ -1610,16 +1574,7 @@ else:
     b1, b2 = st.columns(2)
 
     with b1:
-        # NUEVO: filtro adicional para la vista de SIEMBRA
-        structure_pick = st.selectbox(
-            "Estructura de variables",
-            STRUCTURE_VAR_OPTIONS,
-            index=0
-        )
-
-        structure_y_label = get_structure_var_label(structure_pick)
-
-        agg_turn_siem = build_boxplot_structure_df(dff, "SIEMBRA FINAL", structure_pick)
+        agg_turn_siem = build_boxplot_metric_df(dff, "SIEMBRA FINAL", metric_general_pick)
 
         if agg_turn_siem.empty:
             st.info("No hay datos suficientes para SIEMBRA FINAL.")
@@ -1629,11 +1584,11 @@ else:
                 x="SIEMBRA FINAL",
                 y="METRIC_VAL",
                 points="outliers",
-                title=f"{structure_y_label} por SIEMBRA"
+                title=f"{y_metric_label} por SIEMBRA"
             )
             fig_siem.update_layout(
                 xaxis=dict(type="category", title="SIEMBRA"),
-                yaxis=dict(title=structure_y_label)
+                yaxis=dict(title=y_metric_label)
             )
             st.plotly_chart(fig_siem, use_container_width=True)
 
