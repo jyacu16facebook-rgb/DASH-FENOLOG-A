@@ -1583,7 +1583,7 @@ else:
                 agg_turn_siem,
                 x="SIEMBRA FINAL",
                 y="METRIC_VAL",
-                points="outliers",
+                points="all",
                 title=f"{y_metric_label} por SIEMBRA"
             )
             fig_siem.update_layout(
@@ -1608,7 +1608,7 @@ else:
                 x="EDAD PLANTA FINAL",
                 y="METRIC_VAL",
                 category_orders={"EDAD PLANTA FINAL": order_age},
-                points="outliers",
+                points="all",
                 title=f"{y_metric_label} por EDAD"
             )
             fig_age.update_layout(
@@ -1635,7 +1635,7 @@ else:
             agg_turn_seg,
             x="SEG DENSIDAD",
             y="METRIC_VAL",
-            points="outliers",
+            points="all",
             title=f"{y_metric_label} por SEG DENSIDAD"
         )
         fig_seg.update_layout(
